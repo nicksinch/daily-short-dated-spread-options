@@ -71,13 +71,20 @@ def test_daily_bars_drop_the_forming_bar_for_today():
 
 
 def test_daily_bars_parse_nanosecond_timestamps():
+    # DailyBar.date is a `date`, which can't carry microseconds, so this only
+    # pins that a genuine 9-digit fractional second doesn't choke the parse
+    # or shift the date. Exact microsecond truncation (9 digits -> 6) is
+    # pinned precisely in test_latest_quote_parses_both_sides, whose
+    # `timestamp` field is a full datetime.
     client = make_client({
         "/v2/stocks/SPY/bars": {
-            "bars": [{"t": "2026-09-02T04:00:00Z", "o": 1, "h": 2, "l": 0.5, "c": 765.16, "v": 10}],
+            "bars": [{"t": "2026-09-02T04:00:00.123456789Z", "o": 1, "h": 2, "l": 0.5,
+                      "c": 765.16, "v": 10}],
             "symbol": "SPY",
         }
     })
-    assert client.get_daily_bars("SPY", date(2026, 9, 3))[0].date == date(2026, 9, 2)
+    bar = client.get_daily_bars("SPY", date(2026, 9, 3))[0]
+    assert bar.date == date(2026, 9, 2)
 
 
 def test_empty_bars_return_empty_list_not_an_error():

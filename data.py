@@ -17,6 +17,11 @@ import requests
 
 from config import FeatureConfig
 
+# Transport mechanics, not strategy tunables -- kept out of FeatureConfig so
+# that config stays about feature calculation, not HTTP plumbing.
+_HTTP_TIMEOUT_SECONDS = 10
+_MAX_BARS_PER_PAGE = 10000  # Alpaca's per-page maximum for stock bars
+
 
 @dataclass(frozen=True)
 class MarketClock:
@@ -90,7 +95,9 @@ class AlpacaClient:
         return cls(key_id, secret_key, cfg)
 
     def _get(self, base: str, path: str, params: dict | None = None) -> dict:
-        response = self._session.get(f"{base}{path}", params=params, timeout=10)
+        response = self._session.get(
+            f"{base}{path}", params=params, timeout=_HTTP_TIMEOUT_SECONDS
+        )
         response.raise_for_status()
         return response.json()
 
@@ -119,7 +126,7 @@ class AlpacaClient:
                 "start": start.isoformat(),
                 "adjustment": "split",
                 "feed": self._cfg.bar_feed,
-                "limit": 10000,
+                "limit": _MAX_BARS_PER_PAGE,
             },
         )
         bars = [
