@@ -1,7 +1,9 @@
 import math
 import pytest
+from datetime import date, datetime, timedelta, timezone
 
-from features import annualized_vol, log_returns, simple_moving_average
+from config import FeatureConfig
+from features import annualized_vol, log_returns, simple_moving_average, Feature, Status, bar_freshness, quote_freshness
 
 R = math.log(1.01)
 
@@ -55,3 +57,68 @@ def test_sma50_of_1_through_50():
 def test_sma_uses_only_the_newest_window():
     # 50 closes but a 20-wide window -> mean of 31..50.
     assert simple_moving_average(list(range(1, 51)), 20) == 40.5
+
+
+NOW = datetime(2026, 9, 3, 15, 30, tzinfo=timezone.utc)
+
+
+def test_ok_feature_is_usable():
+    f = Feature.ok(1.5, NOW)
+    assert f.status is Status.OK
+    assert f.value == 1.5
+    assert f.usable
+
+
+def test_missing_feature_has_no_value_and_is_not_usable():
+    f = Feature.missing("no quote")
+    assert f.status is Status.MISSING
+    assert f.value is None
+    assert f.timestamp is None
+    assert f.detail == "no quote"
+    assert not f.usable
+
+
+def test_stale_feature_keeps_its_value_but_is_not_usable():
+    # The caller must be able to see the number and decide for itself.
+    f = Feature.stale(1.5, NOW, "300s old")
+    assert f.status is Status.STALE
+    assert f.value == 1.5
+    assert not f.usable
+
+
+def test_fresh_quote_is_ok_while_market_open():
+    cfg = FeatureConfig()
+    status, detail = quote_freshness(NOW - timedelta(seconds=3), NOW, cfg, market_open=True)
+    assert status is Status.OK
+    assert detail is None
+
+
+def test_old_quote_is_stale_while_market_open():
+    cfg = FeatureConfig()
+    status, detail = quote_freshness(NOW - timedelta(minutes=5), NOW, cfg, market_open=True)
+    assert status is Status.STALE
+    assert "300s old" in detail
+
+
+def test_old_quote_is_ok_while_market_closed():
+    # Last session's data is the freshest that exists. "Market is closed" is
+    # a trading decision, not a data-quality verdict.
+    cfg = FeatureConfig()
+    status, detail = quote_freshness(NOW - timedelta(hours=11), NOW, cfg, market_open=False)
+    assert status is Status.OK
+    assert detail is None
+
+
+def test_yesterdays_bar_is_fresh():
+    # The critical case: during a session the newest settled bar is always
+    # ~18h old, and must not be marked stale.
+    cfg = FeatureConfig()
+    status, _ = bar_freshness(date(2026, 9, 2), date(2026, 9, 3), cfg)
+    assert status is Status.OK
+
+
+def test_bar_older_than_the_limit_is_stale():
+    cfg = FeatureConfig()
+    status, detail = bar_freshness(date(2026, 8, 20), date(2026, 9, 3), cfg)
+    assert status is Status.STALE
+    assert "14 days old" in detail
