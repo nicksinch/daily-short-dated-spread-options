@@ -861,8 +861,9 @@ Append to `tests/test_data.py`:
 
 ```python
 def test_resolve_expiry_takes_the_earliest_after_today():
-    # The endpoint returns contracts ordered by strike, not expiry, so the
-    # earliest date must be selected rather than the first row taken.
+    # Selecting the earliest date is order-independent, so it stays correct
+    # whatever order the endpoint returns rows in. (Live 2026-09-03 the order
+    # is expiration_date then strike; min() does not depend on that holding.)
     client = make_client({
         "/v2/options/contracts": {
             "option_contracts": [
@@ -999,6 +1000,12 @@ Add both methods to `AlpacaClient`:
         Asks Alpaca which contracts exist rather than assuming tomorrow is a
         trading day -- SPY expires every trading day, but holidays leave gaps
         (2026-09-07 is Labor Day).
+
+        The response is capped at 100 rows and normally carries a
+        next_page_token: one expiry's strike list alone exceeds the cap, so a
+        blanket truncation raise here would fire on every call. Selection is
+        safe because the endpoint orders by (expiration_date, strike), so the
+        earliest expiry is always on the first page.
         """
         payload = self._get(
             self.TRADING_URL,
@@ -1682,8 +1689,10 @@ def test_market_context_is_reported_separately_from_features():
 
 def test_main_module_contains_no_order_placing_code():
     # Scope guard: this session builds data and signal only.
+    # Tokens are specific to order placement. "submit" is deliberately not
+    # among them: it collides with the module docstring's "submits nothing".
     source = (__import__("pathlib").Path(__file__).parent.parent / "main.py").read_text()
-    for forbidden in ("/v2/orders", "order_class", "mleg", "position_intent", "submit"):
+    for forbidden in ("/v2/orders", "order_class", "mleg", "position_intent"):
         assert forbidden not in source
 ```
 
