@@ -21,6 +21,8 @@ from config import FeatureConfig
 # that config stays about feature calculation, not HTTP plumbing.
 _HTTP_TIMEOUT_SECONDS = 10
 _MAX_BARS_PER_PAGE = 10000  # Alpaca's per-page maximum for stock bars
+_MAX_OPTION_CONTRACTS_PER_PAGE = 100  # plenty for one underlying's expiries
+_MAX_OPTION_CHAIN_PER_PAGE = 1000  # counts contracts, not strikes -- see get_option_chain
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,18 @@ class StockTrade:
     timestamp: datetime
 
 
+@dataclass(frozen=True)
+class OptionQuote:
+    symbol: str
+    strike: float
+    right: str  # "C" or "P"
+    bid: float | None
+    ask: float | None
+    iv: float | None
+    delta: float | None
+    timestamp: datetime | None
+
+
 def _timestamp(raw: str) -> datetime:
     """Parse Alpaca's RFC-3339 timestamps.
 
@@ -64,6 +78,15 @@ def _timestamp(raw: str) -> datetime:
     microseconds, which is far finer than anything here needs.
     """
     return datetime.fromisoformat(raw)
+
+
+def _parse_occ(symbol: str) -> tuple[float, str]:
+    """Split an OCC symbol into strike and right.
+
+    SPY260904C00772000 -> (772.0, "C"): the last eight digits are the strike
+    in thousandths, and the character before them is the right.
+    """
+    return int(symbol[-8:]) / 1000, symbol[-9]
 
 
 class AlpacaClient:
@@ -171,3 +194,77 @@ class AlpacaClient:
         return StockTrade(
             price=trade["p"], size=trade["s"], timestamp=_timestamp(trade["t"])
         )
+
+    def resolve_expiry(self, symbol: str, today: date) -> date:
+        """The expiry `expiry_offset_sessions` sessions ahead.
+
+        Asks Alpaca which contracts exist rather than assuming tomorrow is a
+        trading day -- SPY expires every trading day, but holidays leave gaps
+        (2026-09-07 is Labor Day).
+        """
+        payload = self._get(
+            self.TRADING_URL,
+            "/v2/options/contracts",
+            {
+                "underlying_symbols": symbol,
+                "expiration_date_gte": (today + timedelta(days=1)).isoformat(),
+                "type": "call",
+                "limit": _MAX_OPTION_CONTRACTS_PER_PAGE,
+            },
+        )
+        expiries = sorted(
+            {c["expiration_date"] for c in (payload.get("option_contracts") or [])}
+        )
+        if not expiries:
+            raise RuntimeError(f"no option contracts for {symbol} after {today}")
+        index = self._cfg.expiry_offset_sessions - 1
+        if index >= len(expiries):
+            raise RuntimeError(
+                f"only {len(expiries)} expiries available after {today}, "
+                f"need offset {self._cfg.expiry_offset_sessions}"
+            )
+        return date.fromisoformat(expiries[index])
+
+    def get_option_chain(
+        self, symbol: str, expiry: date, strike_lo: float, strike_hi: float
+    ) -> list[OptionQuote]:
+        """Snapshots for one expiry across a strike band.
+
+        `limit` counts contracts, not strikes, and defaults to 100 -- a wide
+        band truncates mid-chain. An explicit limit is sent and a returned
+        page token is treated as an error rather than computed upon.
+        """
+        payload = self._get(
+            self.DATA_URL,
+            f"/v1beta1/options/snapshots/{symbol}",
+            {
+                "expiration_date": expiry.isoformat(),
+                "strike_price_gte": strike_lo,
+                "strike_price_lte": strike_hi,
+                "feed": self._cfg.option_feed,
+                "limit": _MAX_OPTION_CHAIN_PER_PAGE,
+            },
+        )
+        if payload.get("next_page_token"):
+            raise RuntimeError(
+                f"option chain for {symbol} {expiry} was truncated; "
+                f"narrow the strike band or follow the page token"
+            )
+        chain = []
+        for occ, snapshot in (payload.get("snapshots") or {}).items():
+            strike, right = _parse_occ(occ)
+            quote = snapshot.get("latestQuote") or {}
+            greeks = snapshot.get("greeks") or {}
+            chain.append(
+                OptionQuote(
+                    symbol=occ,
+                    strike=strike,
+                    right=right,
+                    bid=quote.get("bp"),
+                    ask=quote.get("ap"),
+                    iv=snapshot.get("impliedVolatility"),
+                    delta=greeks.get("delta"),
+                    timestamp=_timestamp(quote["t"]) if quote.get("t") else None,
+                )
+            )
+        return chain
