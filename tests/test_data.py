@@ -156,6 +156,25 @@ def test_resolve_expiry_raises_when_no_contracts_exist():
         client.resolve_expiry("SPY", date(2026, 9, 3))
 
 
+def test_resolve_expiry_names_truncation_when_offset_exceeds_the_first_page():
+    # A single expiry's strike list already exceeds one page, so the
+    # requested offset can fall outside the expiries visible on the first
+    # page even though more exist beyond it. The error must name truncation
+    # as the cause rather than the misleading "only N available" wording,
+    # which is only accurate when there is no further page.
+    session = StubSession({
+        "/v2/options/contracts": {
+            "option_contracts": [{"expiration_date": "2026-09-04"}],
+            "next_page_token": "MTAw",
+        }
+    })
+    client = AlpacaClient(
+        "key", "secret", FeatureConfig(expiry_offset_sessions=2), session=session
+    )
+    with pytest.raises(RuntimeError, match="truncated"):
+        client.resolve_expiry("SPY", date(2026, 9, 3))
+
+
 def test_option_chain_parses_strike_and_right_from_the_occ_symbol():
     client = make_client({
         "/v1beta1/options/snapshots/SPY": {

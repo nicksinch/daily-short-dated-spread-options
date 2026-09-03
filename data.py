@@ -202,6 +202,16 @@ class AlpacaClient:
         trading day -- SPY expires every trading day, but holidays leave gaps
         (2026-09-07 is Labor Day).
         """
+        # A single expiry's strike list already exceeds one page, so this
+        # response is routinely truncated -- unlike get_option_chain, no
+        # blanket "raise on next_page_token" guard is possible here.
+        # Picking the earliest expiry off a possibly-truncated page still
+        # works because the live endpoint orders rows by
+        # (expiration_date ASC, strike ASC): the nearest expiry's rows fill
+        # the first page before any later expiry appears. That ordering,
+        # not row position, is what selection actually depends on -- if the
+        # API ever stopped ordering by expiration date first, this would
+        # break.
         payload = self._get(
             self.TRADING_URL,
             "/v2/options/contracts",
@@ -219,6 +229,13 @@ class AlpacaClient:
             raise RuntimeError(f"no option contracts for {symbol} after {today}")
         index = self._cfg.expiry_offset_sessions - 1
         if index >= len(expiries):
+            if payload.get("next_page_token"):
+                raise RuntimeError(
+                    f"expiry list for {symbol} after {today} was truncated at "
+                    f"the page limit ({len(expiries)} expiries visible); "
+                    f"offset {self._cfg.expiry_offset_sessions} could not be "
+                    f"resolved from the first page"
+                )
             raise RuntimeError(
                 f"only {len(expiries)} expiries available after {today}, "
                 f"need offset {self._cfg.expiry_offset_sessions}"
