@@ -6,7 +6,10 @@ which keeps the seam between fetching and calculating thin enough to test
 either side without the other.
 
 Network and HTTP problems raise. Absent market data returns `None` or an
-empty list for the feature layer to classify.
+empty list for the feature layer to classify. Two conditions also raise
+`RuntimeError` rather than returning a guess: `resolve_expiry` when no
+contracts exist or the configured offset cannot be resolved from the first
+page, and `get_option_chain` when the response is truncated.
 """
 
 import os
@@ -265,7 +268,7 @@ class AlpacaClient:
         if payload.get("next_page_token"):
             raise RuntimeError(
                 f"option chain for {symbol} {expiry} was truncated; "
-                f"narrow the strike band or follow the page token"
+                "narrow the strike band"
             )
         chain = []
         for occ, snapshot in (payload.get("snapshots") or {}).items():

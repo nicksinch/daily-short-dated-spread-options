@@ -135,8 +135,9 @@ def test_credentials_go_in_headers_and_never_in_params():
 
 
 def test_resolve_expiry_takes_the_earliest_after_today():
-    # The endpoint returns contracts ordered by strike, not expiry, so the
-    # earliest date must be selected rather than the first row taken.
+    # Selecting the earliest date is order-independent, so it stays correct
+    # whatever order the endpoint returns rows in. (Live 2026-09-03 the order
+    # is expiration_date then strike; min() does not depend on that holding.)
     client = make_client({
         "/v2/options/contracts": {
             "option_contracts": [

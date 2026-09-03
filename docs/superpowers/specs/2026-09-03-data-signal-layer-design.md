@@ -137,7 +137,7 @@ class FeatureConfig:
     rv_window: int = 20
     staleness_threshold: timedelta = timedelta(seconds=60)
     max_bar_age_days: int = 5
-    strike_band_width: int = 8            # strikes each side of spot
+    strike_band_dollars: int = 8          # dollars each side of spot
     delta_target: float = 0.30
     sma_short_window: int = 20
     sma_long_window: int = 50
@@ -150,9 +150,11 @@ class FeatureConfig:
     bar_lookback_days: int = 120          # >= 50 sessions plus holidays and weekends
 ```
 
-`strike_band_width` counts strikes, not dollars. On SPY's uniform $1 grid the two
-coincide today, but a count survives a grid change. At 8 each side the chain request is
-34 contracts, safely under the 100-contract cap.
+`strike_band_dollars` is a dollar half-width around spot: the chain is requested over
+`round(spot) ± band`. On SPY's uniform $1 grid a dollar and a strike coincide, so at 8
+each side the chain request is 34 contracts, safely under the 100-contract cap. On a
+finer grid — or with a wider band — the same dollar width would cover more strikes and
+push toward that cap.
 
 `delta_target` is unused this session. It is retained because 1DTE greeks are real, so
 it will be used by strike selection in a later session.
@@ -173,7 +175,7 @@ class Feature:
     detail: str | None = None
 
     @classmethod
-    def ok(cls, value: float, timestamp: datetime) -> "Feature": ...
+    def ok(cls, value: float, timestamp: datetime, detail: str | None = None) -> "Feature": ...
     @classmethod
     def missing(cls, detail: str) -> "Feature": ...
     @classmethod
@@ -212,8 +214,8 @@ class FeatureSet:
     spot_over_sma50: Feature
     atm_iv: Feature
     market_open: bool
-    next_open: datetime | None
-    next_close: datetime | None
+    next_open: datetime
+    next_close: datetime
     expiry: date
     as_of: datetime
 ```
@@ -244,10 +246,10 @@ No network. Every calculation delegates to the pure functions above. If `math.lo
 appears inside a builder, the separation has leaked.
 
 ```python
-def spot_feature(quote, trade, cfg, now, clock) -> Feature
-def realized_vol_feature(bars, cfg) -> Feature
-def sma_ratio_feature(bars, spot: Feature, window: int, cfg) -> Feature
-def atm_iv_feature(chain, spot: Feature, cfg, now, clock) -> Feature
+def spot_feature(quote, trade, cfg, now, market_open: bool) -> Feature
+def realized_vol_feature(bars, cfg, today: date) -> Feature
+def sma_ratio_feature(bars, spot: Feature, window: int, cfg, today: date) -> Feature
+def atm_iv_feature(chain, spot: Feature, cfg, now, market_open: bool) -> Feature
 def build_feature_set(...) -> FeatureSet
 ```
 
@@ -267,7 +269,9 @@ stale; the newest bar date is recorded in `detail`. This departs from the source
 
 **ATM IV.** Take the strike nearest to spot, read the call IV and the put IV at that
 strike, return their arithmetic mean. If either side is absent, zero, or non-positive,
-return `missing` — never substitute zero. Timestamp is the option market-data timestamp.
+return `missing` — never substitute zero. Both legs contribute to the value, so the
+timestamp carried is the **older** of the two legs' quote timestamps: the feature is
+only as fresh as its stalest input.
 At 1DTE an occasional `missing` is a genuine market condition, not a defect.
 
 The averaging is not a formality. Measured at the 766 strike for the 2026-09-04 expiry
@@ -316,12 +320,13 @@ class MarketClock:   is_open, timestamp, next_open, next_close
 
 ```python
 class AlpacaClient:
-    def __init__(self, key_id: str, secret_key: str, cfg: FeatureConfig): ...
+    def __init__(self, key_id: str, secret_key: str, cfg: FeatureConfig,
+                 session: object | None = None): ...
     def get_clock(self) -> MarketClock
-    def get_daily_bars(self, symbol: str, lookback_days: int) -> list[DailyBar]
+    def get_daily_bars(self, symbol: str, today: date) -> list[DailyBar]
     def get_latest_quote(self, symbol: str) -> StockQuote | None
     def get_latest_trade(self, symbol: str) -> StockTrade | None
-    def resolve_expiry(self, symbol: str, on: date) -> date
+    def resolve_expiry(self, symbol: str, today: date) -> date
     def get_option_chain(self, symbol, expiry, strike_lo, strike_hi) -> list[OptionQuote]
 ```
 

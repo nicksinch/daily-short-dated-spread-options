@@ -225,7 +225,10 @@ def atm_iv_feature(
             return Feature.missing(f"no implied volatility on the {nearest} {label}")
 
     value = (call.iv + put.iv) / 2
-    timestamp = call.timestamp or put.timestamp
+    # Both legs contribute to the value, so the feature is only as fresh as
+    # its stalest input: carry the older timestamp, not whichever comes first.
+    stamps = [t for t in (call.timestamp, put.timestamp) if t is not None]
+    timestamp = min(stamps) if stamps else None
     detail = f"mean of {nearest}C {call.iv:.4f} and {nearest}P {put.iv:.4f}"
     if timestamp is None:
         return Feature.missing(f"no quote timestamp at strike {nearest}")
@@ -251,8 +254,8 @@ class FeatureSet:
     spot_over_sma50: Feature
     atm_iv: Feature
     market_open: bool
-    next_open: datetime | None
-    next_close: datetime | None
+    next_open: datetime
+    next_close: datetime
     expiry: date
     as_of: datetime
 

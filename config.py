@@ -24,7 +24,10 @@ class FeatureConfig:
     # Market and instrument
     underlying: str = "SPY"
     expiry_offset_sessions: int = 1  # 1 = next expiry after today (1DTE)
-    strike_band_width: int = 8  # strikes each side of spot
+    # Dollar half-width around spot, which equals a strike count only on a $1
+    # grid (SPY's grid today). Widening it, or a finer grid, pushes the chain
+    # request toward the 100-contract page cap.
+    strike_band_dollars: int = 8
     delta_target: float = 0.30  # unused here; strike selection is a later session
 
     # Alpaca feeds. Historical bars may use SIP; recent quotes may not

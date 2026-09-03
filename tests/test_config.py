@@ -19,7 +19,7 @@ def test_defaults_match_the_design():
     assert cfg.option_feed == "indicative"
     assert cfg.stock_feed == "iex"
     assert cfg.bar_feed == "sip"
-    assert cfg.strike_band_width == 8
+    assert cfg.strike_band_dollars == 8
     assert cfg.delta_target == 0.30
     assert cfg.bar_lookback_days == 120
 

@@ -12,15 +12,15 @@ from zoneinfo import ZoneInfo
 
 from config import FeatureConfig
 from data import AlpacaClient
-from features import FeatureSet, build_feature_set
+from features import FeatureSet, build_feature_set, spot_feature
 
 EASTERN = ZoneInfo("America/New_York")
 
 
-def format_feature_set(fs: FeatureSet) -> str:
+def format_feature_set(fs: FeatureSet, symbol: str) -> str:
     """One line per feature: name, value, status, timestamp, detail."""
     lines = [
-        f"SPY  as of {fs.as_of.isoformat()}  "
+        f"{symbol}  as of {fs.as_of.isoformat()}  "
         f"market_open={fs.market_open}  next_open={fs.next_open.isoformat()}",
         f"expiry: {fs.expiry}",
         "",
@@ -64,17 +64,23 @@ def main(argv: list[str] | None = None) -> int:
     trade = client.get_latest_trade(cfg.underlying)
     expiry = client.resolve_expiry(cfg.underlying, today)
 
-    reference = quote.bid if quote and quote.bid > 0 else (trade.price if trade else 0.0)
-    band = cfg.strike_band_width
-    chain = client.get_option_chain(
-        cfg.underlying, expiry, round(reference) - band, round(reference) + band
-    )
+    # Centre the strike band on the same spot the features will use, rather
+    # than restating the usable-quote rule here. No spot means no band worth
+    # requesting: never invent a reference price for absent market data.
+    spot = spot_feature(quote, trade, cfg, now, clock.is_open)
+    if spot.value is None:
+        chain = []
+    else:
+        band = cfg.strike_band_dollars
+        chain = client.get_option_chain(
+            cfg.underlying, expiry, round(spot.value) - band, round(spot.value) + band
+        )
 
     features = build_feature_set(
         bars=bars, quote=quote, trade=trade, chain=chain, clock=clock,
         expiry=expiry, cfg=cfg, now=now, today=today,
     )
-    print(format_feature_set(features))
+    print(format_feature_set(features, cfg.underlying))
     return 0
 
 

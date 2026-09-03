@@ -24,15 +24,15 @@ The interpreter is the in-project virtualenv; PyCharm registers it as SDK
 
 ```bash
 source .venv/bin/activate
-python main.py
+python main.py --dry-run
 ```
 
 Install dependencies into that venv (`.venv/bin/pip install ...`) rather than system Python,
-and record them in a manifest (`requirements.txt` or `pyproject.toml`) — one does not exist yet,
-so creating it is part of the first real change.
+and record them in `requirements.txt`, which is pinned.
 
-There is no lint, format, or test command configured. PyCharm's Black integration is enabled
-in `.idea/misc.xml`, but `black` is not installed in the venv.
+Tests run with `.venv/bin/pytest`. There is no lint or format command configured:
+PyCharm's Black integration is enabled in `.idea/misc.xml`, but `black` is not
+installed in the venv.
 
 ## Domain context
 

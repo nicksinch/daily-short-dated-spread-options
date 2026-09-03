@@ -303,6 +303,22 @@ def test_atm_iv_is_missing_at_0dte_when_the_api_omits_greeks():
     assert f.status is Status.MISSING
 
 
+def test_atm_iv_is_stale_when_only_one_leg_is_old():
+    # Both legs contribute to the mean, so a stale put makes the whole
+    # feature stale even when the call is fresh.
+    chain = [opt(772, "C", 0.1317), opt(772, "P", 0.2123, ts=NOW - timedelta(hours=6))]
+    f = atm_iv_feature(chain, Feature.ok(772.4, NOW), FeatureConfig(), NOW, True)
+    assert f.status is Status.STALE
+    assert f.timestamp == NOW - timedelta(hours=6)
+
+
+def test_atm_iv_is_missing_when_neither_leg_has_a_timestamp():
+    chain = [opt(772, "C", 0.1317, ts=None), opt(772, "P", 0.2123, ts=None)]
+    f = atm_iv_feature(chain, Feature.ok(772.4, NOW), FeatureConfig(), NOW, True)
+    assert f.status is Status.MISSING
+    assert f.value is None
+
+
 def test_atm_iv_is_missing_when_spot_is_missing():
     chain = [opt(772, "C", 0.1317), opt(772, "P", 0.2123)]
     f = atm_iv_feature(chain, Feature.missing("no quote"), FeatureConfig(), NOW, True)
