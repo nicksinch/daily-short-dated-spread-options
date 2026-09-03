@@ -3,8 +3,22 @@ import pytest
 from datetime import date, datetime, timedelta, timezone
 
 from config import FeatureConfig
-from data import StockQuote, StockTrade
-from features import annualized_vol, log_returns, simple_moving_average, Feature, Status, bar_freshness, quote_freshness, spot_feature
+from data import DailyBar, MarketClock, OptionQuote, StockQuote, StockTrade
+from features import (
+    FeatureSet,
+    Feature,
+    Status,
+    annualized_vol,
+    atm_iv_feature,
+    bar_freshness,
+    build_feature_set,
+    log_returns,
+    quote_freshness,
+    realized_vol_feature,
+    simple_moving_average,
+    sma_ratio_feature,
+    spot_feature,
+)
 
 R = math.log(1.01)
 
@@ -171,9 +185,6 @@ def test_spot_is_not_stale_when_the_market_is_closed():
     assert f.status is Status.OK
 
 
-from data import DailyBar
-from features import realized_vol_feature, sma_ratio_feature
-
 TODAY = date(2026, 9, 3)
 
 
@@ -246,3 +257,81 @@ def test_sma_ratio_is_missing_with_too_few_bars():
     bars = bars_from([float(c) for c in range(1, 11)])
     f = sma_ratio_feature(bars, Feature.ok(21.0, NOW), 20, FeatureConfig(), TODAY)
     assert f.status is Status.MISSING
+
+
+def opt(strike, right, iv, ts=NOW):
+    return OptionQuote(
+        symbol=f"SPY260904{right}{int(strike * 1000):08d}",
+        strike=strike, right=right, bid=1.0, ask=1.1,
+        iv=iv, delta=0.5, timestamp=ts,
+    )
+
+
+def test_atm_iv_averages_the_call_and_put_at_the_nearest_strike():
+    chain = [opt(772, "C", 0.1317), opt(772, "P", 0.2123),
+             opt(775, "C", 0.9), opt(775, "P", 0.9)]
+    f = atm_iv_feature(chain, Feature.ok(772.4, NOW), FeatureConfig(), NOW, True)
+    assert f.value == pytest.approx(0.1720)
+    assert f.status is Status.OK
+
+
+def test_atm_iv_picks_the_strike_nearest_spot_not_the_first():
+    chain = [opt(770, "C", 0.5), opt(770, "P", 0.5),
+             opt(772, "C", 0.10), opt(772, "P", 0.20)]
+    f = atm_iv_feature(chain, Feature.ok(772.4, NOW), FeatureConfig(), NOW, True)
+    assert f.value == pytest.approx(0.15)
+
+
+def test_atm_iv_is_missing_when_one_side_has_no_iv():
+    # Never substitute zero for an absent IV.
+    chain = [opt(772, "C", 0.1317), opt(772, "P", None)]
+    f = atm_iv_feature(chain, Feature.ok(772.4, NOW), FeatureConfig(), NOW, True)
+    assert f.status is Status.MISSING
+    assert f.value is None
+
+
+def test_atm_iv_is_missing_when_iv_is_zero():
+    chain = [opt(772, "C", 0.1317), opt(772, "P", 0.0)]
+    f = atm_iv_feature(chain, Feature.ok(772.4, NOW), FeatureConfig(), NOW, True)
+    assert f.status is Status.MISSING
+
+
+def test_atm_iv_is_missing_at_0dte_when_the_api_omits_greeks():
+    # The real 0DTE case: no IV on either leg.
+    chain = [opt(772, "C", None), opt(772, "P", None)]
+    f = atm_iv_feature(chain, Feature.ok(772.4, NOW), FeatureConfig(), NOW, True)
+    assert f.status is Status.MISSING
+
+
+def test_atm_iv_is_missing_when_spot_is_missing():
+    chain = [opt(772, "C", 0.1317), opt(772, "P", 0.2123)]
+    f = atm_iv_feature(chain, Feature.missing("no quote"), FeatureConfig(), NOW, True)
+    assert f.status is Status.MISSING
+    assert "spot" in f.detail
+
+
+def test_atm_iv_is_missing_on_an_empty_chain():
+    f = atm_iv_feature([], Feature.ok(772.4, NOW), FeatureConfig(), NOW, True)
+    assert f.status is Status.MISSING
+
+
+def test_feature_set_cascades_a_missing_spot():
+    clock = MarketClock(
+        is_open=True, timestamp=NOW,
+        next_open=NOW + timedelta(days=1), next_close=NOW + timedelta(hours=4),
+    )
+    fs = build_feature_set(
+        bars=bars_from([100.0] * 51),
+        quote=None, trade=None,
+        chain=[opt(772, "C", 0.13), opt(772, "P", 0.21)],
+        clock=clock, expiry=date(2026, 9, 4),
+        cfg=FeatureConfig(), now=NOW, today=TODAY,
+    )
+    assert fs.spot.status is Status.MISSING
+    assert fs.spot_over_sma20.status is Status.MISSING
+    assert fs.spot_over_sma50.status is Status.MISSING
+    assert fs.atm_iv.status is Status.MISSING
+    # RV20 does not depend on spot and is still computed.
+    assert fs.rv20.status is Status.OK
+    assert fs.market_open is True
+    assert fs.expiry == date(2026, 9, 4)

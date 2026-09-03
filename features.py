@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 from enum import Enum
 
 from config import FeatureConfig
-from data import DailyBar, StockQuote, StockTrade
+from data import DailyBar, MarketClock, OptionQuote, StockQuote, StockTrade
 
 
 class Status(str, Enum):
@@ -191,3 +191,94 @@ def sma_ratio_feature(
     if status is Status.STALE:
         return Feature.stale(value, spot.timestamp, f"{detail}; {stale_detail}")
     return Feature.ok(value, spot.timestamp, detail)
+
+
+def atm_iv_feature(
+    chain: Sequence["OptionQuote"],
+    spot: Feature,
+    cfg: FeatureConfig,
+    now: datetime,
+    market_open: bool,
+) -> Feature:
+    """Mean of the call and put implied volatility at the nearest strike.
+
+    An absent IV is reported as missing, never replaced with zero. At 0DTE
+    Alpaca omits implied volatility entirely, so this returns missing for
+    every same-day contract regardless of feed.
+
+    The two legs can diverge widely -- 0.1317 against 0.2123 was measured at
+    the same strike and expiry -- so the mean sits well away from either.
+    """
+    if not spot.usable:
+        return Feature.missing(f"spot unusable ({spot.status.value}): {spot.detail}")
+    if not chain:
+        return Feature.missing("empty option chain")
+
+    nearest = min(chain, key=lambda q: abs(q.strike - spot.value)).strike
+    at_strike = {q.right: q for q in chain if q.strike == nearest}
+    call, put = at_strike.get("C"), at_strike.get("P")
+
+    for label, leg in (("call", call), ("put", put)):
+        if leg is None:
+            return Feature.missing(f"no {label} at strike {nearest}")
+        if leg.iv is None or leg.iv <= 0:
+            return Feature.missing(f"no implied volatility on the {nearest} {label}")
+
+    value = (call.iv + put.iv) / 2
+    timestamp = call.timestamp or put.timestamp
+    detail = f"mean of {nearest}C {call.iv:.4f} and {nearest}P {put.iv:.4f}"
+    if timestamp is None:
+        return Feature.missing(f"no quote timestamp at strike {nearest}")
+
+    status, stale_detail = quote_freshness(timestamp, now, cfg, market_open)
+    if status is Status.STALE:
+        return Feature.stale(value, timestamp, f"{detail}; {stale_detail}")
+    return Feature.ok(value, timestamp, detail)
+
+
+@dataclass(frozen=True)
+class FeatureSet:
+    """All features plus the market context they were observed in.
+
+    Market context lives here rather than on individual features so that
+    data quality and trading decisions stay separate: a closed market makes
+    no feature defective.
+    """
+
+    spot: Feature
+    rv20: Feature
+    spot_over_sma20: Feature
+    spot_over_sma50: Feature
+    atm_iv: Feature
+    market_open: bool
+    next_open: datetime | None
+    next_close: datetime | None
+    expiry: date
+    as_of: datetime
+
+
+def build_feature_set(
+    bars: Sequence["DailyBar"],
+    quote: "StockQuote | None",
+    trade: "StockTrade | None",
+    chain: Sequence["OptionQuote"],
+    clock: "MarketClock",
+    expiry: date,
+    cfg: FeatureConfig,
+    now: datetime,
+    today: date,
+) -> FeatureSet:
+    """Assemble every feature. Pure: all data is passed in."""
+    spot = spot_feature(quote, trade, cfg, now, clock.is_open)
+    return FeatureSet(
+        spot=spot,
+        rv20=realized_vol_feature(bars, cfg, today),
+        spot_over_sma20=sma_ratio_feature(bars, spot, cfg.sma_short_window, cfg, today),
+        spot_over_sma50=sma_ratio_feature(bars, spot, cfg.sma_long_window, cfg, today),
+        atm_iv=atm_iv_feature(chain, spot, cfg, now, clock.is_open),
+        market_open=clock.is_open,
+        next_open=clock.next_open,
+        next_close=clock.next_close,
+        expiry=expiry,
+        as_of=now,
+    )
