@@ -3,7 +3,8 @@ import pytest
 from datetime import date, datetime, timedelta, timezone
 
 from config import FeatureConfig
-from features import annualized_vol, log_returns, simple_moving_average, Feature, Status, bar_freshness, quote_freshness
+from data import StockQuote, StockTrade
+from features import annualized_vol, log_returns, simple_moving_average, Feature, Status, bar_freshness, quote_freshness, spot_feature
 
 R = math.log(1.01)
 
@@ -122,3 +123,49 @@ def test_bar_older_than_the_limit_is_stale():
     status, detail = bar_freshness(date(2026, 8, 20), date(2026, 9, 3), cfg)
     assert status is Status.STALE
     assert "14 days old" in detail
+
+
+def quote(bid, ask, ts=NOW):
+    return StockQuote(bid=bid, ask=ask, bid_size=10, ask_size=10, timestamp=ts)
+
+
+def trade(price, ts=NOW):
+    return StockTrade(price=price, size=10, timestamp=ts)
+
+
+def test_spot_is_the_mid_of_a_two_sided_quote():
+    f = spot_feature(quote(772.73, 772.76), trade(772.40), FeatureConfig(), NOW, True)
+    assert f.value == pytest.approx(772.745)
+    assert f.status is Status.OK
+
+
+def test_one_sided_quote_falls_back_to_the_last_trade():
+    # Real case: bid 764.34 / ask 0 would give a mid of 382.17.
+    f = spot_feature(quote(764.34, 0.0), trade(766.46), FeatureConfig(), NOW, True)
+    assert f.value == 766.46
+    assert f.status is Status.OK
+    assert "one-sided" in f.detail
+
+
+def test_missing_quote_falls_back_to_the_last_trade():
+    f = spot_feature(None, trade(766.46), FeatureConfig(), NOW, True)
+    assert f.value == 766.46
+
+
+def test_no_quote_and_no_trade_is_missing():
+    f = spot_feature(None, None, FeatureConfig(), NOW, True)
+    assert f.status is Status.MISSING
+    assert f.value is None
+
+
+def test_stale_spot_keeps_its_value():
+    old = NOW - timedelta(minutes=5)
+    f = spot_feature(quote(772.73, 772.76, old), None, FeatureConfig(), NOW, True)
+    assert f.status is Status.STALE
+    assert f.value == pytest.approx(772.745)
+
+
+def test_spot_is_not_stale_when_the_market_is_closed():
+    old = NOW - timedelta(hours=11)
+    f = spot_feature(quote(772.73, 772.76, old), None, FeatureConfig(), NOW, False)
+    assert f.status is Status.OK

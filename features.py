@@ -17,6 +17,7 @@ from datetime import date, datetime
 from enum import Enum
 
 from config import FeatureConfig
+from data import StockQuote, StockTrade
 
 
 class Status(str, Enum):
@@ -102,3 +103,38 @@ def annualized_vol(rets: Sequence[float], periods_per_year: int) -> float:
 def simple_moving_average(closes: Sequence[float], window: int) -> float:
     """Mean of the newest `window` closes."""
     return sum(closes[-window:]) / window
+
+
+def spot_feature(
+    quote: "StockQuote | None",
+    trade: "StockTrade | None",
+    cfg: FeatureConfig,
+    now: datetime,
+    market_open: bool,
+) -> Feature:
+    """Current underlying price.
+
+    Prefers the mid of a two-sided quote. A one-sided quote is rejected
+    outright: the IEX feed covers a small share of volume and genuinely
+    publishes quotes with a zero side outside regular hours, where a naive
+    mid produces a plausible-looking but badly wrong price.
+    """
+    detail = None
+    if quote is not None and quote.bid > 0 and quote.ask > 0:
+        value = (quote.bid + quote.ask) / 2
+        timestamp = quote.timestamp
+    elif trade is not None:
+        value = trade.price
+        timestamp = trade.timestamp
+        detail = (
+            "one-sided quote, used last trade"
+            if quote is not None
+            else "no quote, used last trade"
+        )
+    else:
+        return Feature.missing("no two-sided quote and no trade")
+
+    status, freshness_detail = quote_freshness(timestamp, now, cfg, market_open)
+    if status is Status.STALE:
+        return Feature.stale(value, timestamp, freshness_detail)
+    return Feature.ok(value, timestamp, detail)
