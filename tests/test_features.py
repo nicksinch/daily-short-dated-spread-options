@@ -169,3 +169,80 @@ def test_spot_is_not_stale_when_the_market_is_closed():
     old = NOW - timedelta(hours=11)
     f = spot_feature(quote(772.73, 772.76, old), None, FeatureConfig(), NOW, False)
     assert f.status is Status.OK
+
+
+from data import DailyBar
+from features import realized_vol_feature, sma_ratio_feature
+
+TODAY = date(2026, 9, 3)
+
+
+def bars_from(closes, end=date(2026, 9, 2)):
+    """Daily bars ending on `end`, one calendar day apart."""
+    return [
+        DailyBar(
+            date=end - timedelta(days=len(closes) - 1 - i),
+            open=c, high=c, low=c, close=c, volume=1,
+        )
+        for i, c in enumerate(closes)
+    ]
+
+
+def test_rv20_of_a_flat_series_is_zero():
+    f = realized_vol_feature(bars_from([100.0] * 21), FeatureConfig(), TODAY)
+    assert f.value == 0.0
+    assert f.status is Status.OK
+
+
+def test_rv20_timestamp_is_the_newest_bar_used():
+    f = realized_vol_feature(bars_from([100.0] * 21), FeatureConfig(), TODAY)
+    assert f.timestamp.date() == date(2026, 9, 2)
+
+
+def test_rv20_needs_21_closes_for_20_returns():
+    # The off-by-one: 20 returns require 21 prices.
+    f = realized_vol_feature(bars_from([100.0] * 20), FeatureConfig(), TODAY)
+    assert f.status is Status.MISSING
+    assert "21" in f.detail
+
+
+def test_rv20_uses_only_the_newest_window():
+    closes = [1.0] * 30 + [100.0 if i % 2 == 0 else 100 * math.exp(R) for i in range(21)]
+    f = realized_vol_feature(bars_from(closes), FeatureConfig(), TODAY)
+    expected = R * math.sqrt(20 / 19) * math.sqrt(252)
+    assert f.value == pytest.approx(expected)
+
+
+def test_rv20_is_stale_when_bars_are_old():
+    f = realized_vol_feature(
+        bars_from([100.0] * 21, end=date(2026, 8, 20)), FeatureConfig(), TODAY
+    )
+    assert f.status is Status.STALE
+    assert f.value == 0.0
+
+
+def test_sma_ratio_divides_spot_by_the_average():
+    bars = bars_from([float(c) for c in range(1, 21)])
+    f = sma_ratio_feature(bars, Feature.ok(21.0, NOW), 20, FeatureConfig(), TODAY)
+    assert f.value == pytest.approx(2.0)
+
+
+def test_sma_ratio_carries_the_spot_timestamp():
+    # The ratio moves with spot, and spot is the input that can go stale.
+    bars = bars_from([float(c) for c in range(1, 21)])
+    f = sma_ratio_feature(bars, Feature.ok(21.0, NOW), 20, FeatureConfig(), TODAY)
+    assert f.timestamp == NOW
+    assert "2026-09-02" in f.detail
+
+
+def test_sma_ratio_is_missing_when_spot_is_missing():
+    bars = bars_from([float(c) for c in range(1, 21)])
+    f = sma_ratio_feature(bars, Feature.missing("no quote"), 20, FeatureConfig(), TODAY)
+    assert f.status is Status.MISSING
+    assert "spot" in f.detail
+
+
+def test_sma_ratio_is_missing_with_too_few_bars():
+    bars = bars_from([float(c) for c in range(1, 11)])
+    f = sma_ratio_feature(bars, Feature.ok(21.0, NOW), 20, FeatureConfig(), TODAY)
+    assert f.status is Status.MISSING

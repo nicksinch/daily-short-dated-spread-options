@@ -13,11 +13,11 @@ import math
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 
 from config import FeatureConfig
-from data import StockQuote, StockTrade
+from data import DailyBar, StockQuote, StockTrade
 
 
 class Status(str, Enum):
@@ -138,3 +138,56 @@ def spot_feature(
     if status is Status.STALE:
         return Feature.stale(value, timestamp, freshness_detail)
     return Feature.ok(value, timestamp, detail)
+
+
+def realized_vol_feature(
+    bars: Sequence["DailyBar"], cfg: FeatureConfig, today: date
+) -> Feature:
+    """Annualised realised volatility over `rv_window` returns.
+
+    Needs one more close than the window: 20 returns require 21 prices.
+    """
+    needed = cfg.rv_window + 1
+    if len(bars) < needed:
+        return Feature.missing(f"need {needed} settled closes, got {len(bars)}")
+
+    window = bars[-needed:]
+    value = annualized_vol(
+        log_returns([b.close for b in window]), cfg.trading_days_per_year
+    )
+    newest = window[-1].date
+    timestamp = datetime.combine(newest, datetime.min.time(), tzinfo=timezone.utc)
+
+    status, detail = bar_freshness(newest, today, cfg)
+    if status is Status.STALE:
+        return Feature.stale(value, timestamp, detail)
+    return Feature.ok(value, timestamp)
+
+
+def sma_ratio_feature(
+    bars: Sequence["DailyBar"],
+    spot: Feature,
+    window: int,
+    cfg: FeatureConfig,
+    today: date,
+) -> Feature:
+    """spot / SMA(window) over settled closes.
+
+    Carries the spot timestamp rather than the newest close, because the
+    ratio moves with spot and spot is the input that can go stale. The bar
+    date is preserved in `detail`.
+    """
+    if not spot.usable:
+        return Feature.missing(f"spot unusable ({spot.status.value}): {spot.detail}")
+    if len(bars) < window:
+        return Feature.missing(f"need {window} settled closes, got {len(bars)}")
+
+    average = simple_moving_average([b.close for b in bars], window)
+    value = spot.value / average
+    newest = bars[-1].date
+    detail = f"sma{window}={average:.2f} over closes to {newest}"
+
+    status, stale_detail = bar_freshness(newest, today, cfg)
+    if status is Status.STALE:
+        return Feature.stale(value, spot.timestamp, f"{detail}; {stale_detail}")
+    return Feature.ok(value, spot.timestamp, detail)
