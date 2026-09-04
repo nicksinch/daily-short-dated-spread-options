@@ -146,15 +146,4 @@ def test_a_serialization_failure_warns_with_repr_and_writes_nothing(tmp_path, ca
     err = capsys.readouterr().err
     assert "WARNING" in err
     assert "object at" in err  # repr(object()) contains "object at 0x..."
-    # Verify no file was created or it's empty
-    if (tmp_path / "decisions.jsonl").exists():
-        assert (tmp_path / "decisions.jsonl").read_text() == ""
-
-
-def test_a_serialization_failure_does_not_raise(tmp_path):
-    # The append function never raises, even on serialization failure
-    bad_record = make(a_trade())
-    bad_record["bad_value"] = object()
-    path = str(tmp_path / "decisions.jsonl")
-    # This should not raise
-    append(bad_record, path)
+    assert not (tmp_path / "decisions.jsonl").exists()

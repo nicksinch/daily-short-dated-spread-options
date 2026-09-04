@@ -73,12 +73,12 @@ def test_only_broker_reaches_an_order_endpoint():
                 assert forbidden not in source, f"{name} mentions {forbidden}"
 
 
-def test_exactly_one_mode_flag_is_required(monkeypatch):
+def test_exactly_one_mode_flag_is_required():
     with pytest.raises(SystemExit):
         main_module.main(["--stance", "bullish"])
 
 
-def test_the_two_mode_flags_are_mutually_exclusive(monkeypatch):
+def test_the_two_mode_flags_are_mutually_exclusive():
     with pytest.raises(SystemExit):
         main_module.main(["--dry-run", "--submit", "--stance", "bullish"])
 
@@ -160,10 +160,11 @@ def run_main_with(
 class StubBroker:
     """Records what main() asks of the broker. Places nothing."""
 
-    def __init__(self, positions=None, working=None, outcome=None):
+    def __init__(self, positions=None, working=None, outcome=None, await_error=None):
         self.positions = positions or []
         self.working = working or []
         self.outcome = outcome
+        self.await_error = await_error
         self.submitted = []
 
     def open_option_positions(self):
@@ -177,6 +178,8 @@ class StubBroker:
         return self.outcome
 
     def await_fill(self, order_id):
+        if self.await_error is not None:
+            raise self.await_error
         return self.outcome
 
 
@@ -241,18 +244,40 @@ def test_an_unfilled_order_exits_one(monkeypatch, tmp_path):
     )
 
 
+def test_a_failed_confirmation_still_journals_the_submitted_order(monkeypatch, tmp_path):
+    # The order is already live once submit() returns. If await_fill then
+    # raises (a 429, a 500, a socket timeout on any of its polls), the run
+    # must still record what was submitted -- not blow up before the append
+    # that is the only trace of a live position.
+    path = tmp_path / "d.jsonl"
+    submitted = an_outcome(status="pending_new")
+    broker = use_broker(monkeypatch, StubBroker(
+        outcome=submitted, await_error=RuntimeError("503 Service Unavailable"),
+    ))
+    a_bullish_run(
+        monkeypatch, mode="--submit", expected=1, journal_path=str(path),
+    )
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["order"]["id"] == submitted.id
+
+
 def test_an_expiry_already_covered_submits_nothing(monkeypatch, tmp_path, capsys):
     from orders import OptionPosition
+    path = tmp_path / "d.jsonl"
     broker = use_broker(monkeypatch, StubBroker(
         positions=[OptionPosition("SPY260904P00760000", -2.0)],
         outcome=an_outcome(),
     ))
     a_bullish_run(
         monkeypatch, mode="--submit", expected=0,
-        journal_path=str(tmp_path / "d.jsonl"),
+        journal_path=str(path),
     )
     assert broker.submitted == []
     assert "already holding" in capsys.readouterr().out
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["decision"]["will_trade"] is True
 
 
 def test_every_run_appends_exactly_one_journal_line(monkeypatch, tmp_path):

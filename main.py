@@ -179,7 +179,15 @@ def main(argv: list[str] | None = None) -> int:
         append(build_record(**context), order_cfg.journal_path)
         return 0
 
-    outcome = broker.await_fill(broker.submit(payload).id)
+    submitted = broker.submit(payload)
+    try:
+        outcome = broker.await_fill(submitted.id)
+    except Exception as exc:  # noqa: BLE001 - the order is already live; record
+        # whatever we have rather than let a poll failure (429, 500, a socket
+        # timeout) propagate past the append below and leave a live position
+        # with no record anywhere.
+        print(f"\nWARNING: could not confirm the fill: {exc}", file=sys.stderr)
+        outcome = submitted
     print(f"\n{format_outcome(outcome)}")
     append(
         build_record(payload=payload, record=outcome, **context),

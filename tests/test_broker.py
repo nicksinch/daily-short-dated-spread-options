@@ -2,6 +2,7 @@ import dataclasses
 
 import pytest
 
+import broker as broker_module
 from broker import Broker
 from config import OrderConfig
 from orders import OptionPosition, OrderRecord, OrderState, classify
@@ -65,12 +66,30 @@ def test_no_positions_is_an_empty_list():
     assert broker.open_option_positions() == []
 
 
-def test_open_orders_asks_for_nested_legs():
+def test_a_position_missing_asset_class_is_still_returned():
+    # The guard must fail closed: if Alpaca ever omits or renames
+    # asset_class, dropping the position silently would empty out
+    # existing_exposure and let a second spread go on the same expiry.
+    broker, _ = make_broker({
+        "/v2/positions": [{"symbol": "SPY260905P00761000", "qty": "-2"}]
+    })
+    assert broker.open_option_positions() == [
+        OptionPosition(symbol="SPY260905P00761000", qty=-2.0)
+    ]
+
+
+def test_open_orders_asks_for_nested_legs_and_an_explicit_page_limit():
     # Without nested=true an mleg order's legs are not returned at all.
+    # Without an explicit limit, Alpaca defaults to 50 -- on an account
+    # with more open orders than that, the guard could miss today's
+    # working spread and resubmit.
     broker, session = make_broker({"/v2/orders": []})
     broker.open_orders()
     _, params = session.gets[0]
-    assert params == {"status": "open", "nested": "true"}
+    assert params == {
+        "status": "open", "nested": "true",
+        "limit": broker_module._MAX_OPEN_ORDERS_PER_PAGE,
+    }
 
 
 def test_open_orders_reads_leg_symbols_not_the_empty_parent_symbol():

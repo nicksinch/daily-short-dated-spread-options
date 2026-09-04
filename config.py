@@ -67,4 +67,4 @@ class OrderConfig:
     time_in_force: str = "day"          # options accept only day or gtc
     fill_poll_seconds: float = 1.0      # between order status re-fetches
     fill_timeout_seconds: float = 15.0  # then stop polling and record what was seen
-    journal_path: str = "decisions.jsonl"
+    journal_path: str = "decisions.jsonl"  # relative to the process's working directory

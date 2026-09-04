@@ -22,6 +22,9 @@ from orders import OptionPosition, OrderRecord, OrderState, classify
 # Transport mechanics, not strategy tunables, matching data.py's convention.
 _HTTP_TIMEOUT_SECONDS = 10
 _US_OPTION = "us_option"
+# Alpaca defaults GET /v2/orders to limit=50; an account with more open
+# orders than that would silently miss today's working spread.
+_MAX_OPEN_ORDERS_PER_PAGE = 500
 
 
 class Broker:
@@ -62,13 +65,18 @@ class Broker:
         """Open option positions only.
 
         The paper account may hold unrelated equity, as it did during the
-        smoke test, so the asset class is filtered rather than assumed.
+        smoke test, so the asset class is filtered rather than assumed. A
+        position is excluded only on an explicit non-option asset_class: a
+        missing or renamed key is kept in, because this feeds the duplicate
+        guard and a safety guard must fail closed. Keeping a stray equity
+        position is harmless -- existing_exposure discriminates by OCC
+        prefix regardless.
         """
         payload = self._get("/v2/positions")
         return [
             OptionPosition(symbol=p["symbol"], qty=float(p["qty"]))
             for p in (payload or [])
-            if p.get("asset_class") == _US_OPTION
+            if p.get("asset_class", _US_OPTION) == _US_OPTION
         ]
 
     def open_orders(self) -> list[list[str]]:
@@ -76,9 +84,14 @@ class Broker:
 
         `nested=true` is required: a multi-leg parent order's own `symbol` is the
         empty string and its legs are not returned without the flag, so a
-        guard reading the parent symbol would silently never match.
+        guard reading the parent symbol would silently never match. `limit`
+        is explicit because Alpaca defaults to 50, and this feeds the same
+        duplicate guard as open_option_positions.
         """
-        payload = self._get("/v2/orders", {"status": "open", "nested": "true"})
+        payload = self._get(
+            "/v2/orders",
+            {"status": "open", "nested": "true", "limit": _MAX_OPEN_ORDERS_PER_PAGE},
+        )
         orders = []
         for order in payload or []:
             legs = order.get("legs") or []

@@ -13,12 +13,10 @@ from datetime import date, datetime
 
 from features import Feature, FeatureSet
 from orders import OrderRecord
-from strategy import Decision
+from strategy import FEATURE_NAMES, Decision
 
 DRY_RUN = "dry_run"
 SUBMIT = "submit"
-
-FEATURE_NAMES = ("spot", "rv20", "spot_over_sma20", "spot_over_sma50", "atm_iv")
 
 
 def _feature(feature: Feature) -> dict:
