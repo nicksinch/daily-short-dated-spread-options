@@ -12,7 +12,10 @@ Alpaca's paper environment.
   network errors, returns `None` for absent market data.
 - `features.py` — pure arithmetic plus feature builders that attach
   timestamps and a data-quality `Status`. No I/O.
-- `main.py --dry-run` — fetches, computes, prints, exits. Places no orders.
+- `strategy.py` — stance to sized spread: structure, strike selection by
+  delta, credit, max loss and position size. Pure; no I/O.
+- `main.py --dry-run --stance <bullish|bearish|neutral>` — fetches, computes,
+  decides, prints, exits. Places no orders.
 - `tests/` — pytest. Run with `.venv/bin/pytest`.
 
 Credentials come from `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`.
@@ -36,8 +39,10 @@ installed in the venv.
 
 ## Domain context
 
-A daily defined-risk option spread on SPY. Order construction, strike
-selection, sizing and submission are deliberately not implemented yet.
+A daily defined-risk option spread on SPY. Strike selection and sizing are
+implemented in `strategy.py` and documented in
+`docs/superpowers/specs/2026-09-04-strategy-layer-design.md`. Order
+construction and submission are deliberately not implemented yet.
 
 Two findings constrain the design; both are documented in
 `docs/superpowers/specs/2026-09-03-data-signal-layer-design.md`:
