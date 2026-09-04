@@ -7,6 +7,8 @@ included: strategy.py was built so a quiet day is as explainable as a busy
 one, and a log of trades only would discard half of that.
 """
 
+import json
+import sys
 from datetime import date, datetime
 
 from features import Feature, FeatureSet
@@ -94,3 +96,20 @@ def build_record(
         "decision": _decision(decision),
         "order": _order(payload, record),
     }
+
+
+def append(record: dict, path: str) -> None:
+    """Append one line. Never raises.
+
+    The single deliberate exception to this codebase's raise-on-failure
+    discipline. By the time this is called an order may already be live, so
+    dying on a full disk would leave a position with no record anywhere.
+    The warning carries the complete record, which makes stderr the fallback
+    journal.
+    """
+    try:
+        with open(path, "a") as handle:
+            handle.write(json.dumps(record) + "\n")
+    except OSError as exc:
+        print(f"WARNING: could not write the journal to {path}: {exc}", file=sys.stderr)
+        print(json.dumps(record), file=sys.stderr)

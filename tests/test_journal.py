@@ -2,7 +2,7 @@ import json
 from datetime import date, datetime, timedelta, timezone
 
 from features import Feature, FeatureSet
-from journal import DRY_RUN, SUBMIT, build_record
+from journal import DRY_RUN, SUBMIT, append, build_record
 from orders import OrderRecord, OrderState
 from strategy import Decision, SpreadLeg, SpreadProposal, Stance
 
@@ -112,3 +112,24 @@ def test_the_timestamp_and_expiry_are_iso_strings():
     assert record["timestamp"] == NOW.isoformat()
     assert record["expiry"] == "2026-09-05"
     assert record["mode"] == "submit"
+
+
+def test_append_writes_one_line_per_run(tmp_path):
+    path = str(tmp_path / "decisions.jsonl")
+    append(make(a_trade()), path)
+    append(make(a_stand_aside()), path)
+    lines = (tmp_path / "decisions.jsonl").read_text().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["decision"]["will_trade"] is True
+    assert json.loads(lines[1])["decision"]["will_trade"] is False
+
+
+def test_a_write_failure_warns_and_preserves_the_record(tmp_path, capsys):
+    # The one place an I/O error must not raise: by the time this runs an
+    # order may already be live, and dying on a full disk would leave a
+    # position with no record anywhere. stderr keeps the record.
+    unwritable = str(tmp_path / "no-such-directory" / "decisions.jsonl")
+    append(make(a_trade()), unwritable)
+    err = capsys.readouterr().err
+    assert "WARNING" in err
+    assert "SPY260905P00761000" in err
