@@ -10,9 +10,10 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import FeatureConfig
+from config import FeatureConfig, StrategyConfig
 from data import AlpacaClient
 from features import FeatureSet, build_feature_set, spot_feature
+from strategy import Decision, Stance, build_decision
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -42,6 +43,28 @@ def format_feature_set(fs: FeatureSet, symbol: str) -> str:
     return "\n".join(lines)
 
 
+def format_decision(decision: Decision) -> str:
+    """The decision, and either its legs or the reason there are none."""
+    lines = [f"stance: {decision.stance.value}"]
+    if decision.proposal is None:
+        lines.append(f"decision: stand aside — {decision.reason}")
+        return "\n".join(lines)
+
+    p = decision.proposal
+    lines.append(f"decision: trade {p.structure}")
+    for leg in (p.short_leg, p.long_leg):
+        lines.append(
+            f"  {leg.side:<5} {leg.symbol}  {leg.strike}{leg.right}  "
+            f"delta {leg.delta:+.4f}  bid {leg.bid:.2f}  ask {leg.ask:.2f}"
+        )
+    lines.append(
+        f"  credit {p.credit:.2f}  max loss/contract ${p.max_loss_per_contract:.2f}  "
+        f"quantity {p.quantity}  total risk ${p.total_risk:.2f} "
+        f"of ${p.risk_budget:.2f} budget"
+    )
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SPY data and signal layer")
     parser.add_argument(
@@ -50,9 +73,17 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="fetch data, compute features, print them, exit (the only mode)",
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--stance",
+        required=True,
+        type=Stance,
+        choices=list(Stance),
+        help="directional view; supplied by hand until the LLM layer exists",
+    )
+    args = parser.parse_args(argv)
 
     cfg = FeatureConfig()
+    strategy_cfg = StrategyConfig()
     client = AlpacaClient.from_env(cfg)
 
     now = datetime.now(tz=EASTERN)
@@ -63,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     quote = client.get_latest_quote(cfg.underlying)
     trade = client.get_latest_trade(cfg.underlying)
     expiry = client.resolve_expiry(cfg.underlying, today)
+    account = client.get_account()
 
     # Centre the strike band on the same spot the features will use, rather
     # than restating the usable-quote rule here. No spot means no band worth
@@ -81,6 +113,9 @@ def main(argv: list[str] | None = None) -> int:
         expiry=expiry, cfg=cfg, now=now, today=today,
     )
     print(format_feature_set(features, cfg.underlying))
+    print()
+    decision = build_decision(features, chain, args.stance, account.equity, strategy_cfg)
+    print(format_decision(decision))
     return 0
 
 
