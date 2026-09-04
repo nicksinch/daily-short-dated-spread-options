@@ -53,3 +53,18 @@ class StrategyConfig:
     risk_fraction: float = 0.01         # max risk as a share of account equity
     min_credit_fraction: float = 0.10   # reject credit below this share of width
     contract_multiplier: int = 100      # US equity options, shares per contract
+
+
+@dataclass(frozen=True)
+class OrderConfig:
+    """Tunables for placing the order and recording what happened.
+
+    Separate from StrategyConfig for the same reason that class is separate
+    from FeatureConfig: this is about submitting a spread, not about
+    choosing one.
+    """
+
+    time_in_force: str = "day"          # options accept only day or gtc
+    fill_poll_seconds: float = 1.0      # between order status re-fetches
+    fill_timeout_seconds: float = 15.0  # then stop polling and record what was seen
+    journal_path: str = "decisions.jsonl"

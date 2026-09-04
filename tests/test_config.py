@@ -3,7 +3,7 @@ from datetime import timedelta
 
 import pytest
 
-from config import FeatureConfig, StrategyConfig
+from config import FeatureConfig, StrategyConfig, OrderConfig
 
 
 def test_defaults_match_the_design():
@@ -47,3 +47,17 @@ def test_strategy_config_is_frozen():
     cfg = StrategyConfig()
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.delta_target = 0.5
+
+
+def test_order_defaults_match_the_design():
+    cfg = OrderConfig()
+    assert cfg.time_in_force == "day"
+    assert cfg.fill_poll_seconds == 1.0
+    assert cfg.fill_timeout_seconds == 15.0
+    assert cfg.journal_path == "decisions.jsonl"
+
+
+def test_order_config_is_frozen():
+    cfg = OrderConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.time_in_force = "gtc"
