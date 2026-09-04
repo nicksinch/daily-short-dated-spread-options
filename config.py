@@ -25,10 +25,9 @@ class FeatureConfig:
     underlying: str = "SPY"
     expiry_offset_sessions: int = 1  # 1 = next expiry after today (1DTE)
     # Dollar half-width around spot, which equals a strike count only on a $1
-    # grid (SPY's grid today). Widening it, or a finer grid, pushes the chain
-    # request toward the 100-contract page cap.
-    strike_band_dollars: int = 8
-    delta_target: float = 0.30  # unused here; strike selection is a later session
+    # grid (SPY's grid today). $20 leaves room for a $5 protective wing beyond
+    # a short strike a few points out of the money.
+    strike_band_dollars: int = 20
 
     # Alpaca feeds. Historical bars may use SIP; recent quotes may not
     # (403 on this plan). Options are indicative; OPRA is not signed, and
@@ -39,3 +38,18 @@ class FeatureConfig:
 
     # Fetch sizing. 120 calendar days comfortably covers 50 sessions.
     bar_lookback_days: int = 120
+
+
+@dataclass(frozen=True)
+class StrategyConfig:
+    """Tunables for turning a stance into a sized spread.
+
+    Separate from FeatureConfig because that class is about computing
+    features, not about what to do with them.
+    """
+
+    delta_target: float = 0.30          # absolute delta of the short leg
+    spread_width_dollars: float = 5.0   # long leg this far further OTM
+    risk_fraction: float = 0.01         # max risk as a share of account equity
+    min_credit_fraction: float = 0.10   # reject credit below this share of width
+    contract_multiplier: int = 100      # US equity options, shares per contract
