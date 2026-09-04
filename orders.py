@@ -6,8 +6,9 @@ status means, whether the account is already positioned -- testable without
 a socket.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 
 from config import OrderConfig
@@ -91,3 +92,42 @@ def classify(status: str) -> OrderState:
     if status in _DEAD:
         return OrderState.DEAD
     return OrderState.WORKING
+
+
+@dataclass(frozen=True)
+class OptionPosition:
+    symbol: str
+    qty: float  # signed: negative is short
+
+
+def expiry_prefix(underlying: str, expiry: date) -> str:
+    """The leading characters every OCC symbol for this expiry shares."""
+    return f"{underlying}{expiry:%y%m%d}"
+
+
+def existing_exposure(
+    positions: Sequence[OptionPosition],
+    working_orders: Sequence[Sequence[str]],
+    underlying: str,
+    expiry: date,
+) -> str | None:
+    """Why the account is already positioned on `expiry`, or None to proceed.
+
+    Scoped to the expiry rather than to the strikes: re-running after spot
+    has moved would pick different strikes and slip past a symbol-exact
+    check. Scoped to the expiry rather than to every option: yesterday's
+    1DTE spread is still open this morning and must not stand today's trade
+    aside.
+
+    Returns the reason string that gets printed and journalled, so a blocked
+    run explains itself the way a stand-aside does.
+    """
+    prefix = expiry_prefix(underlying, expiry)
+    held = sorted(p.symbol for p in positions if p.symbol.startswith(prefix))
+    if held:
+        return f"already holding {', '.join(held)} expiring {expiry}"
+    for legs in working_orders:
+        matched = sorted(s for s in legs if s.startswith(prefix))
+        if matched:
+            return f"a working order already covers {', '.join(matched)} expiring {expiry}"
+    return None

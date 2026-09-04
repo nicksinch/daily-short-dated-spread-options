@@ -1,7 +1,8 @@
 import pytest
+from datetime import date
 
 from config import OrderConfig
-from orders import build_order, OrderState, classify
+from orders import build_order, OrderState, classify, OptionPosition, existing_exposure, expiry_prefix
 from strategy import SpreadLeg, SpreadProposal
 
 SHORT = SpreadLeg(
@@ -95,3 +96,52 @@ def test_a_partial_fill_is_still_working():
 
 def test_an_unfamiliar_status_keeps_working_rather_than_looking_filled():
     assert classify("something_alpaca_added_later") is OrderState.WORKING
+
+
+EXPIRY = date(2026, 9, 5)
+
+
+def test_the_prefix_is_the_underlying_and_the_expiry():
+    assert expiry_prefix("SPY", EXPIRY) == "SPY260905"
+
+
+def test_nothing_open_lets_the_trade_through():
+    assert existing_exposure([], [], "SPY", EXPIRY) is None
+
+
+def test_a_position_on_the_target_expiry_blocks():
+    positions = [OptionPosition("SPY260905P00761000", -2.0)]
+    reason = existing_exposure(positions, [], "SPY", EXPIRY)
+    assert reason is not None
+    assert "SPY260905P00761000" in reason
+
+
+def test_yesterdays_expiry_does_not_block_todays_trade():
+    # The 1DTE spread opened yesterday expires today and is still open this
+    # morning. Blocking on it would stand the agent aside every day after
+    # the first.
+    positions = [OptionPosition("SPY260904P00760000", -2.0)]
+    assert existing_exposure(positions, [], "SPY", EXPIRY) is None
+
+
+def test_an_equity_position_does_not_block():
+    assert existing_exposure([OptionPosition("SPY", 1.0)], [], "SPY", EXPIRY) is None
+
+
+def test_a_working_mleg_order_blocks_via_its_legs():
+    # An mleg parent order's own symbol is the empty string; the contracts
+    # live on legs[]. A guard reading the parent would never match.
+    working = [["SPY260905P00761000", "SPY260905P00756000"]]
+    reason = existing_exposure([], working, "SPY", EXPIRY)
+    assert reason is not None
+    assert "SPY260905P00761000" in reason
+
+
+def test_a_working_order_on_another_expiry_does_not_block():
+    assert existing_exposure([], [["SPY260904P00760000"]], "SPY", EXPIRY) is None
+
+
+def test_a_position_is_reported_before_a_working_order():
+    positions = [OptionPosition("SPY260905P00761000", -2.0)]
+    working = [["SPY260905C00770000"]]
+    assert "holding" in existing_exposure(positions, working, "SPY", EXPIRY)
