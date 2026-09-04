@@ -11,11 +11,13 @@ cancels and never replaces: this layer opens positions only.
 """
 
 import os
+import time
+from datetime import datetime
 
 import requests
 
 from config import OrderConfig
-from orders import OptionPosition
+from orders import OptionPosition, OrderRecord, OrderState, classify
 
 # Transport mechanics, not strategy tunables, matching data.py's convention.
 _HTTP_TIMEOUT_SECONDS = 10
@@ -85,3 +87,51 @@ class Broker:
                 symbols = [order["symbol"]]
             orders.append(symbols)
         return orders
+
+    def _post(self, path: str, payload: dict) -> dict:
+        response = self._session.post(
+            f"{self.TRADING_URL}{path}", json=payload, timeout=_HTTP_TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def submit(self, payload: dict) -> OrderRecord:
+        """Place the order. The one call in this repository that trades."""
+        return _record(self._post("/v2/orders", payload))
+
+    def get_order(self, order_id: str) -> OrderRecord:
+        return _record(self._get(f"/v2/orders/{order_id}"))
+
+    def await_fill(self, order_id: str) -> OrderRecord:
+        """Poll until the order is no longer working, or until the timeout.
+
+        Read-only: it never cancels and never replaces, which is what keeps
+        this layer to opening positions. A timeout is a recorded outcome,
+        not an exception -- the caller journals whatever was last seen.
+        """
+        deadline = time.monotonic() + self._cfg.fill_timeout_seconds
+        record = self.get_order(order_id)
+        while record.state is OrderState.WORKING and time.monotonic() < deadline:
+            time.sleep(self._cfg.fill_poll_seconds)
+            record = self.get_order(order_id)
+        return record
+
+
+def _record(payload: dict) -> OrderRecord:
+    """Alpaca's order JSON as the three things this program acts on.
+
+    The status string and fill price are preserved verbatim rather than
+    normalised; the sign Alpaca reports on a credit fill is not something
+    this layer depends on.
+    """
+    status = payload["status"]
+    price = payload.get("filled_avg_price")
+    submitted = payload.get("submitted_at")
+    return OrderRecord(
+        id=payload["id"],
+        status=status,
+        state=classify(status),
+        filled_qty=float(payload.get("filled_qty") or 0),
+        filled_avg_price=None if price is None else float(price),
+        submitted_at=datetime.fromisoformat(submitted) if submitted else None,
+    )
