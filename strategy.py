@@ -10,6 +10,7 @@ Standing aside is a value, not an exception: `Decision` carries a reason in
 both directions so a quiet day is as explainable as a busy one.
 """
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -109,3 +110,38 @@ def select_long_leg(
     """
     wanted = short_strike - width if right == PUT else short_strike + width
     return next((q for q in chain if q.right == right and q.strike == wanted), None)
+
+
+def net_credit(
+    short: OptionQuote, long: OptionQuote, width: float
+) -> float | None:
+    """Credit received per share, or None if the quotes cannot support one.
+
+    The short leg's bid and the long leg's ask are the sides actually
+    received and paid; the other two play no part and are not demanded.
+
+    A credit at or above the width is rejected rather than returned: it would
+    make max loss zero or negative, and a spread that cannot lose is a
+    quoting fault, not an opportunity.
+    """
+    if not short.bid or not long.ask:
+        return None
+    credit = short.bid - long.ask
+    if credit <= 0 or credit >= width:
+        return None
+    return credit
+
+
+def max_loss_per_contract(width: float, credit: float, multiplier: int) -> float:
+    """Worst case per contract, in dollars. The credit is already received."""
+    return (width - credit) * multiplier
+
+
+def position_size(equity: float, risk_fraction: float, max_loss: float) -> int:
+    """Whole contracts that fit the risk budget.
+
+    Zero is a legitimate answer: the budget cannot fund one contract.
+    `max_loss` is positive by construction -- `net_credit` rejects any credit
+    at or above the width -- so there is no division by zero to guard.
+    """
+    return math.floor(equity * risk_fraction / max_loss)

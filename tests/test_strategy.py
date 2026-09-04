@@ -8,6 +8,9 @@ from strategy import (
     SpreadLeg,
     SpreadProposal,
     Stance,
+    max_loss_per_contract,
+    net_credit,
+    position_size,
     select_long_leg,
     select_short_leg,
     structure_for,
@@ -96,3 +99,47 @@ def test_long_leg_is_none_when_the_strike_is_outside_the_chain():
     # Real at the band edge: the short strike is present, its wing is not.
     chain = [a_put(761.0, -0.30), a_put(757.0, -0.22)]
     assert select_long_leg(chain, "P", 761.0, 5.0) is None
+
+
+def test_credit_is_the_short_bid_less_the_long_ask():
+    # The crossing credit, not the mid: the number actually obtainable.
+    short = a_put(761.0, -0.30, bid=1.60, ask=1.68)
+    long = a_put(756.0, -0.18, bid=0.88, ask=0.95)
+    assert net_credit(short, long, width=5.0) == pytest.approx(0.65)
+
+
+@pytest.mark.parametrize(
+    "short_bid, long_ask, why",
+    [
+        (None, 0.95, "no short bid"),
+        (1.60, None, "no long ask"),
+        (0.0, 0.95, "zero short bid"),
+        (0.95, 0.95, "credit is zero"),
+        (0.80, 0.95, "credit is negative"),
+        (5.00, 0.00, "credit equals the width"),
+        (6.00, 0.50, "credit exceeds the width"),
+    ],
+)
+def test_credit_is_none_when_the_quotes_cannot_support_it(short_bid, long_ask, why):
+    # A credit at or above the width would make max loss zero or negative and
+    # divide the sizing by zero. A spread that cannot lose is a quoting fault.
+    short = a_put(761.0, -0.30, bid=short_bid, ask=1.68)
+    long = a_put(756.0, -0.18, bid=0.88, ask=long_ask)
+    assert net_credit(short, long, width=5.0) is None, why
+
+
+def test_max_loss_is_the_width_less_the_credit_times_the_multiplier():
+    assert max_loss_per_contract(5.0, 0.65, 100) == pytest.approx(435.0)
+
+
+def test_position_size_floors_to_whole_contracts():
+    # 1% of $100k is $1,000; two $435 contracts fit, three do not.
+    assert position_size(100_000.0, 0.01, 435.0) == 2
+
+
+def test_position_size_is_zero_when_the_budget_cannot_fund_one_contract():
+    assert position_size(10_000.0, 0.01, 435.0) == 0
+
+
+def test_position_size_takes_an_exact_fit():
+    assert position_size(100_000.0, 0.01, 500.0) == 2
