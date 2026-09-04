@@ -14,8 +14,14 @@ trading in Alpaca's paper environment.
   timestamps and a data-quality `Status`. No I/O.
 - `strategy.py` — stance to sized spread: structure, strike selection by
   delta, credit, max loss and position size. Pure; no I/O.
-- `main.py --dry-run --stance <bullish|bearish|neutral>` — fetches, computes,
-  decides, prints, exits. Places no orders.
+- `orders.py` — pure: the multi-leg payload, order-status classification and
+  the duplicate-position guard. No I/O.
+- `broker.py` — the only module that can place an order. Everything reaching
+  an order endpoint lives here; `data.py` stays read-only.
+- `journal.py` — one JSON line per run, appended, stand-asides included.
+- `main.py --dry-run|--submit --stance <bullish|bearish|neutral>` — fetches,
+  computes, decides, and either prints the order it would place or places it.
+  Exactly one mode flag is required.
 - `tests/` — pytest. Run with `.venv/bin/pytest`.
 
 Credentials come from `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`.
@@ -42,7 +48,16 @@ installed in the venv.
 A daily defined-risk option spread on SPY. Strike selection and sizing are
 implemented in `strategy.py` and documented in
 `docs/superpowers/specs/2026-09-04-strategy-layer-design.md`. Order
-construction and submission are deliberately not implemented yet.
+construction and submission are implemented and documented in
+`docs/superpowers/specs/2026-09-04-order-layer-design.md`. The layer opens
+positions only: nothing closes a spread, so a position is left to expire or
+be closed by hand.
+
+Two invariants are asserted by `tests/test_main.py` rather than merely
+intended: `/v2/orders` appears only in `broker.py`, and the `mleg`
+vocabulary only in `orders.py`. A credit spread is priced with a **negative**
+`limit_price` — Alpaca reads a positive multi-leg limit as a debit, and a
+positive price on a credit spread fills rather than being rejected.
 
 Two findings constrain the design; both are documented in
 `docs/superpowers/specs/2026-09-03-data-signal-layer-design.md`:
