@@ -10,13 +10,17 @@ before a Broker is constructed.
 """
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import FeatureConfig, StrategyConfig
+from broker import Broker
+from config import FeatureConfig, OrderConfig, StrategyConfig
 from data import AlpacaClient
 from features import FeatureSet, build_feature_set, spot_feature
+from journal import DRY_RUN, SUBMIT, append, build_record
+from orders import OrderState, build_order, existing_exposure
 from strategy import Decision, Stance, build_decision
 
 EASTERN = ZoneInfo("America/New_York")
@@ -73,6 +77,19 @@ def format_decision(decision: Decision) -> str:
         f"of ${p.risk_budget:.2f} budget"
     )
     return "\n".join(lines)
+
+
+def format_order(payload: dict) -> str:
+    """The order exactly as it would be sent."""
+    return json.dumps(payload, indent=2)
+
+
+def format_outcome(record) -> str:
+    price = "-" if record.filled_avg_price is None else f"{record.filled_avg_price:.2f}"
+    return (
+        f"order {record.id}: {record.status} ({record.state.value})  "
+        f"filled {record.filled_qty:g} at {price}"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -132,7 +149,43 @@ def main(argv: list[str] | None = None) -> int:
     print()
     decision = build_decision(features, chain, args.stance, account.equity, strategy_cfg)
     print(format_decision(decision))
-    return 0
+
+    order_cfg = OrderConfig()
+    mode = DRY_RUN if args.dry_run else SUBMIT
+    context = dict(
+        now=now, mode=mode, underlying=cfg.underlying, expiry=expiry,
+        features=features, decision=decision,
+    )
+
+    if decision.proposal is None:
+        append(build_record(**context), order_cfg.journal_path)
+        return 0
+
+    payload = build_order(decision.proposal, order_cfg)
+    print()
+    print(format_order(payload))
+
+    if args.dry_run:
+        append(build_record(**context), order_cfg.journal_path)
+        return 0
+
+    # Everything below is the only path in this program that trades.
+    broker = Broker.from_env(order_cfg)
+    blocked = existing_exposure(
+        broker.open_option_positions(), broker.open_orders(), cfg.underlying, expiry
+    )
+    if blocked:
+        print(f"\nnot submitting: {blocked}")
+        append(build_record(**context), order_cfg.journal_path)
+        return 0
+
+    outcome = broker.await_fill(broker.submit(payload).id)
+    print(f"\n{format_outcome(outcome)}")
+    append(
+        build_record(payload=payload, record=outcome, **context),
+        order_cfg.journal_path,
+    )
+    return 0 if outcome.state is OrderState.FILLED else 1
 
 
 if __name__ == "__main__":

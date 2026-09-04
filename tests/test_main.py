@@ -1,8 +1,11 @@
+import dataclasses
+import json
 import pathlib
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+import config as config_module
 import main as main_module
 from config import FeatureConfig
 from data import Account, DailyBar, MarketClock, OptionQuote, StockQuote, StockTrade
@@ -88,6 +91,7 @@ def test_the_submit_flag_is_accepted(monkeypatch):
     monkeypatch.setattr(
         main_module.AlpacaClient, "from_env", classmethod(lambda cls, cfg: client)
     )
+    monkeypatch.setattr(main_module, "append", lambda record, path: None)
     assert main_module.main(["--submit", "--stance", "neutral"]) == 0
 
 
@@ -131,11 +135,149 @@ class StubClient:
         return Account(equity=100_000.0)
 
 
-def run_main_with(monkeypatch, quote, trade, stance="neutral", bars=None, chain=None):
+def run_main_with(
+    monkeypatch, quote, trade, stance="neutral", bars=None, chain=None,
+    mode="--dry-run", expected=0, journal_path=None,
+):
     client = StubClient(quote, trade, bars=bars, chain=chain)
-    monkeypatch.setattr(main_module.AlpacaClient, "from_env", classmethod(lambda cls, cfg: client))
-    assert main_module.main(["--dry-run", "--stance", stance]) == 0
+    monkeypatch.setattr(
+        main_module.AlpacaClient, "from_env", classmethod(lambda cls, cfg: client)
+    )
+    if journal_path is None:
+        monkeypatch.setattr(main_module, "append", lambda record, path: None)
+    else:
+        monkeypatch.setattr(
+            main_module, "OrderConfig",
+            lambda: dataclasses.replace(
+                config_module.OrderConfig(), journal_path=journal_path,
+                fill_poll_seconds=0.0, fill_timeout_seconds=0.0,
+            ),
+        )
+    assert main_module.main([mode, "--stance", stance]) == expected
     return client
+
+
+class StubBroker:
+    """Records what main() asks of the broker. Places nothing."""
+
+    def __init__(self, positions=None, working=None, outcome=None):
+        self.positions = positions or []
+        self.working = working or []
+        self.outcome = outcome
+        self.submitted = []
+
+    def open_option_positions(self):
+        return self.positions
+
+    def open_orders(self):
+        return self.working
+
+    def submit(self, payload):
+        self.submitted.append(payload)
+        return self.outcome
+
+    def await_fill(self, order_id):
+        return self.outcome
+
+
+def use_broker(monkeypatch, broker):
+    monkeypatch.setattr(
+        main_module.Broker, "from_env", classmethod(lambda cls, cfg: broker)
+    )
+    return broker
+
+
+def an_outcome(status="filled", state=None):
+    from orders import OrderRecord, OrderState
+    return OrderRecord(
+        id="b889185b", status=status,
+        state=state or (OrderState.FILLED if status == "filled" else OrderState.WORKING),
+        filled_qty=2.0 if status == "filled" else 0.0,
+        filled_avg_price=-0.65 if status == "filled" else None,
+        submitted_at=NOW,
+    )
+
+
+def a_bullish_run(monkeypatch, **kwargs):
+    return run_main_with(
+        monkeypatch,
+        quote=StockQuote(bid=765.0, ask=765.5, bid_size=1, ask_size=1, timestamp=NOW),
+        trade=None, stance="bullish", bars=daily_bars(60, date(2026, 9, 3)),
+        chain=a_full_chain(), **kwargs,
+    )
+
+
+def test_the_dry_run_never_constructs_a_broker(monkeypatch, tmp_path):
+    # The executable form of the property the module split exists for.
+    def explode(cls, cfg):
+        raise AssertionError("--dry-run must not construct a Broker")
+
+    monkeypatch.setattr(main_module.Broker, "from_env", classmethod(explode))
+    a_bullish_run(monkeypatch, journal_path=str(tmp_path / "d.jsonl"))
+
+
+def test_the_dry_run_prints_the_order_it_would_place(monkeypatch, tmp_path, capsys):
+    a_bullish_run(monkeypatch, journal_path=str(tmp_path / "d.jsonl"))
+    out = capsys.readouterr().out
+    assert '"order_class": "mleg"' in out
+    assert '"limit_price": "-0.65"' in out
+
+
+def test_submitting_sends_the_payload_and_exits_zero_on_a_fill(monkeypatch, tmp_path):
+    broker = use_broker(monkeypatch, StubBroker(outcome=an_outcome()))
+    a_bullish_run(
+        monkeypatch, mode="--submit", expected=0,
+        journal_path=str(tmp_path / "d.jsonl"),
+    )
+    assert len(broker.submitted) == 1
+    assert broker.submitted[0]["limit_price"] == "-0.65"
+
+
+def test_an_unfilled_order_exits_one(monkeypatch, tmp_path):
+    use_broker(monkeypatch, StubBroker(outcome=an_outcome(status="pending_new")))
+    a_bullish_run(
+        monkeypatch, mode="--submit", expected=1,
+        journal_path=str(tmp_path / "d.jsonl"),
+    )
+
+
+def test_an_expiry_already_covered_submits_nothing(monkeypatch, tmp_path, capsys):
+    from orders import OptionPosition
+    broker = use_broker(monkeypatch, StubBroker(
+        positions=[OptionPosition("SPY260904P00760000", -2.0)],
+        outcome=an_outcome(),
+    ))
+    a_bullish_run(
+        monkeypatch, mode="--submit", expected=0,
+        journal_path=str(tmp_path / "d.jsonl"),
+    )
+    assert broker.submitted == []
+    assert "already holding" in capsys.readouterr().out
+
+
+def test_every_run_appends_exactly_one_journal_line(monkeypatch, tmp_path):
+    path = tmp_path / "d.jsonl"
+    use_broker(monkeypatch, StubBroker(outcome=an_outcome()))
+    a_bullish_run(monkeypatch, mode="--submit", journal_path=str(path))
+    a_bullish_run(monkeypatch, journal_path=str(path))
+    lines = path.read_text().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["mode"] == "submit"
+    assert json.loads(lines[1])["mode"] == "dry_run"
+    assert json.loads(lines[0])["order"]["state"] == "filled"
+
+
+def test_a_stand_aside_journals_and_places_nothing(monkeypatch, tmp_path):
+    path = tmp_path / "d.jsonl"
+    broker = use_broker(monkeypatch, StubBroker(outcome=an_outcome()))
+    run_main_with(
+        monkeypatch,
+        quote=StockQuote(bid=765.0, ask=765.5, bid_size=1, ask_size=1, timestamp=NOW),
+        trade=None, stance="neutral", bars=daily_bars(60, date(2026, 9, 3)),
+        chain=a_full_chain(), mode="--submit", journal_path=str(path),
+    )
+    assert broker.submitted == []
+    assert json.loads(path.read_text())["decision"]["will_trade"] is False
 
 
 def test_chain_band_is_centred_on_the_resolved_spot(monkeypatch):
