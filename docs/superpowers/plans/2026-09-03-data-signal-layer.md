@@ -142,7 +142,7 @@ class FeatureConfig:
     # Market and instrument
     underlying: str = "SPY"
     expiry_offset_sessions: int = 1  # 1 = next expiry after today (1DTE)
-    strike_band_width: int = 8  # strikes each side of spot
+    strike_band_dollars: int = 8  # dollars each side of spot
     delta_target: float = 0.30  # unused here; strike selection is a later session
 
     # Alpaca feeds. Historical bars may use SIP; recent quotes may not
@@ -861,8 +861,9 @@ Append to `tests/test_data.py`:
 
 ```python
 def test_resolve_expiry_takes_the_earliest_after_today():
-    # The endpoint returns contracts ordered by strike, not expiry, so the
-    # earliest date must be selected rather than the first row taken.
+    # Selecting the earliest date is order-independent, so it stays correct
+    # whatever order the endpoint returns rows in. (Live 2026-09-03 the order
+    # is expiration_date then strike; min() does not depend on that holding.)
     client = make_client({
         "/v2/options/contracts": {
             "option_contracts": [
@@ -999,6 +1000,12 @@ Add both methods to `AlpacaClient`:
         Asks Alpaca which contracts exist rather than assuming tomorrow is a
         trading day -- SPY expires every trading day, but holidays leave gaps
         (2026-09-07 is Labor Day).
+
+        The response is capped at 100 rows and normally carries a
+        next_page_token: one expiry's strike list alone exceeds the cap, so a
+        blanket truncation raise here would fire on every call. Selection is
+        safe because the endpoint orders by (expiration_date, strike), so the
+        earliest expiry is always on the first page.
         """
         payload = self._get(
             self.TRADING_URL,
@@ -1628,7 +1635,7 @@ git commit -m "Add ATM implied volatility feature and feature set assembly"
 
 **Interfaces:**
 - Consumes: everything from Tasks 1–8
-- Produces: `format_feature_set(fs) -> str`, `main(argv) -> int`
+- Produces: `format_feature_set(fs, symbol) -> str`, `main(argv) -> int`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1660,7 +1667,7 @@ def a_feature_set():
 
 
 def test_output_shows_every_feature_with_its_status():
-    text = format_feature_set(a_feature_set())
+    text = format_feature_set(a_feature_set(), "SPY")
     for name in ("spot", "rv20", "spot/sma20", "spot/sma50", "atm_iv"):
         assert name in text
     assert "766.46" in text
@@ -1668,22 +1675,24 @@ def test_output_shows_every_feature_with_its_status():
 
 
 def test_missing_feature_shows_its_reason_and_no_value():
-    text = format_feature_set(a_feature_set())
+    text = format_feature_set(a_feature_set(), "SPY")
     line = next(l for l in text.splitlines() if l.startswith("atm_iv"))
     assert "missing" in line
     assert "no implied volatility" in line
 
 
 def test_market_context_is_reported_separately_from_features():
-    text = format_feature_set(a_feature_set())
+    text = format_feature_set(a_feature_set(), "SPY")
     assert "market_open=True" in text
     assert "expiry" in text
 
 
 def test_main_module_contains_no_order_placing_code():
     # Scope guard: this session builds data and signal only.
+    # Tokens are specific to order placement. "submit" is deliberately not
+    # among them: it collides with the module docstring's "submits nothing".
     source = (__import__("pathlib").Path(__file__).parent.parent / "main.py").read_text()
-    for forbidden in ("/v2/orders", "order_class", "mleg", "position_intent", "submit"):
+    for forbidden in ("/v2/orders", "order_class", "mleg", "position_intent"):
         assert forbidden not in source
 ```
 
@@ -1711,15 +1720,15 @@ from zoneinfo import ZoneInfo
 
 from config import FeatureConfig
 from data import AlpacaClient
-from features import FeatureSet, build_feature_set
+from features import FeatureSet, build_feature_set, spot_feature
 
 EASTERN = ZoneInfo("America/New_York")
 
 
-def format_feature_set(fs: FeatureSet) -> str:
+def format_feature_set(fs: FeatureSet, symbol: str) -> str:
     """One line per feature: name, value, status, timestamp, detail."""
     lines = [
-        f"SPY  as of {fs.as_of.isoformat()}  "
+        f"{symbol}  as of {fs.as_of.isoformat()}  "
         f"market_open={fs.market_open}  next_open={fs.next_open.isoformat()}",
         f"expiry: {fs.expiry}",
         "",
@@ -1763,17 +1772,20 @@ def main(argv: list[str] | None = None) -> int:
     trade = client.get_latest_trade(cfg.underlying)
     expiry = client.resolve_expiry(cfg.underlying, today)
 
-    reference = quote.bid if quote and quote.bid > 0 else (trade.price if trade else 0.0)
-    band = cfg.strike_band_width
-    chain = client.get_option_chain(
-        cfg.underlying, expiry, round(reference) - band, round(reference) + band
-    )
+    spot = spot_feature(quote, trade, cfg, now, clock.is_open)
+    if spot.value is None:
+        chain = []
+    else:
+        band = cfg.strike_band_dollars
+        chain = client.get_option_chain(
+            cfg.underlying, expiry, round(spot.value) - band, round(spot.value) + band
+        )
 
     features = build_feature_set(
         bars=bars, quote=quote, trade=trade, chain=chain, clock=clock,
         expiry=expiry, cfg=cfg, now=now, today=today,
     )
-    print(format_feature_set(features))
+    print(format_feature_set(features, cfg.underlying))
     return 0
 
 

@@ -74,6 +74,20 @@ a 2026-04-01 start returned 107 daily bars.
   returned a `next_page_token` mid-chain. A ±25 strike band across calls and puts is 102
   contracts and would silently truncate.
 
+### The CLI synthesises zeroed greeks; the REST API omits them
+
+Verified live during market hours on 2026-09-03 at 11:30 ET with tight
+two-sided quotes (771C bid 1.97 / ask 1.99):
+
+- `GET /v1beta1/options/snapshots/SPY` for the 0DTE expiry returns snapshots
+  whose keys are `dailyBar, latestQuote, latestTrade, minuteBar, prevDailyBar`
+  — no `greeks`, no `impliedVolatility`.
+- `alpaca data option chain` for the same contract adds
+  `greeks: {delta: 0, gamma: 0, rho: 0, theta: 0, vega: 0}`.
+
+The zeros are a CLI artifact. The REST API is honest about absence, which is
+one more reason the transport is raw REST.
+
 ### Expiry availability
 
 SPY has an expiration on every trading day. Confirmed for 2026-09-03 through 2026-09-18;
@@ -122,20 +136,25 @@ literal appears inside a function body.
 class FeatureConfig:
     rv_window: int = 20
     staleness_threshold: timedelta = timedelta(seconds=60)
-    strike_band_width: int = 8            # strikes each side of spot
+    max_bar_age_days: int = 5
+    strike_band_dollars: int = 8          # dollars each side of spot
     delta_target: float = 0.30
-    sma_windows: tuple[int, ...] = (20, 50)
+    sma_short_window: int = 20
+    sma_long_window: int = 50
     trading_days_per_year: int = 252
     underlying: str = "SPY"
+    bar_feed: str = "sip"
     option_feed: str = "indicative"
     stock_feed: str = "iex"
     expiry_offset_sessions: int = 1       # 1DTE
     bar_lookback_days: int = 120          # >= 50 sessions plus holidays and weekends
 ```
 
-`strike_band_width` counts strikes, not dollars. On SPY's uniform $1 grid the two
-coincide today, but a count survives a grid change. At 8 each side the chain request is
-34 contracts, safely under the 100-contract cap.
+`strike_band_dollars` is a dollar half-width around spot: the chain is requested over
+`round(spot) ± band`. On SPY's uniform $1 grid a dollar and a strike coincide, so at 8
+each side the chain request is 34 contracts, safely under the 100-contract cap. On a
+finer grid — or with a wider band — the same dollar width would cover more strikes and
+push toward that cap.
 
 `delta_target` is unused this session. It is retained because 1DTE greeks are real, so
 it will be used by strike selection in a later session.
@@ -156,7 +175,7 @@ class Feature:
     detail: str | None = None
 
     @classmethod
-    def ok(cls, value: float, timestamp: datetime) -> "Feature": ...
+    def ok(cls, value: float, timestamp: datetime, detail: str | None = None) -> "Feature": ...
     @classmethod
     def missing(cls, detail: str) -> "Feature": ...
     @classmethod
@@ -195,8 +214,8 @@ class FeatureSet:
     spot_over_sma50: Feature
     atm_iv: Feature
     market_open: bool
-    next_open: datetime | None
-    next_close: datetime | None
+    next_open: datetime
+    next_close: datetime
     expiry: date
     as_of: datetime
 ```
@@ -227,10 +246,10 @@ No network. Every calculation delegates to the pure functions above. If `math.lo
 appears inside a builder, the separation has leaked.
 
 ```python
-def spot_feature(quote, trade, cfg, now, clock) -> Feature
-def realized_vol_feature(bars, cfg) -> Feature
-def sma_ratio_feature(bars, spot: Feature, window: int, cfg) -> Feature
-def atm_iv_feature(chain, spot: Feature, cfg, now, clock) -> Feature
+def spot_feature(quote, trade, cfg, now, market_open: bool) -> Feature
+def realized_vol_feature(bars, cfg, today: date) -> Feature
+def sma_ratio_feature(bars, spot: Feature, window: int, cfg, today: date) -> Feature
+def atm_iv_feature(chain, spot: Feature, cfg, now, market_open: bool) -> Feature
 def build_feature_set(...) -> FeatureSet
 ```
 
@@ -250,7 +269,9 @@ stale; the newest bar date is recorded in `detail`. This departs from the source
 
 **ATM IV.** Take the strike nearest to spot, read the call IV and the put IV at that
 strike, return their arithmetic mean. If either side is absent, zero, or non-positive,
-return `missing` — never substitute zero. Timestamp is the option market-data timestamp.
+return `missing` — never substitute zero. Both legs contribute to the value, so the
+timestamp carried is the **older** of the two legs' quote timestamps: the feature is
+only as fresh as its stalest input.
 At 1DTE an occasional `missing` is a genuine market condition, not a defect.
 
 The averaging is not a formality. Measured at the 766 strike for the 2026-09-04 expiry
@@ -267,10 +288,18 @@ confirming that delta-targeted strike selection is viable at 1DTE in a later ses
 carrying a `detail` that names spot as the cause. RV20 does not depend on spot and is
 computed regardless.
 
-**Staleness.** When the market is open, a feature whose timestamp is older than
-`staleness_threshold` is `stale`. When the market is closed, the last session's data is
-the freshest that exists, so the threshold is not applied and the status stays `ok`;
-the closed market is reported through `FeatureSet.market_open` and `next_open`.
+**Staleness.** Two separate rules, because a settled daily bar is legitimately hours old
+during a session while a quote or trade is expected to be seconds old — a single
+threshold would mark RV20 and the SMA ratios stale on every intraday run.
+
+- **Intraday observations** (spot, ATM IV): while the market is open, a feature whose
+  timestamp is older than `staleness_threshold` is `stale`. When the market is closed,
+  the last session's data is the freshest that exists, so the threshold is not applied
+  and the status stays `ok`; the closed market is reported through
+  `FeatureSet.market_open` and `next_open`.
+- **Settled daily bars** (RV20, SMA ratios): a newest bar dated more than
+  `max_bar_age_days` before today is `stale`. This catches a genuine data gap without
+  flagging the normal hours-old age of a completed session's close.
 
 ## `data.py`
 
@@ -291,12 +320,13 @@ class MarketClock:   is_open, timestamp, next_open, next_close
 
 ```python
 class AlpacaClient:
-    def __init__(self, key_id: str, secret_key: str, cfg: FeatureConfig): ...
+    def __init__(self, key_id: str, secret_key: str, cfg: FeatureConfig,
+                 session: object | None = None): ...
     def get_clock(self) -> MarketClock
-    def get_daily_bars(self, symbol: str, lookback_days: int) -> list[DailyBar]
+    def get_daily_bars(self, symbol: str, today: date) -> list[DailyBar]
     def get_latest_quote(self, symbol: str) -> StockQuote | None
     def get_latest_trade(self, symbol: str) -> StockTrade | None
-    def resolve_expiry(self, symbol: str, on: date) -> date
+    def resolve_expiry(self, symbol: str, today: date) -> date
     def get_option_chain(self, symbol, expiry, strike_lo, strike_hi) -> list[OptionQuote]
 ```
 
@@ -307,7 +337,13 @@ Behaviour required by the investigation findings:
 - `get_option_chain` sends an explicit `limit` and raises if the response carries a
   non-empty `next_page_token`, rather than computing on a truncated chain.
 - `resolve_expiry` asks Alpaca for contracts with expiration after today and takes the
-  earliest, rather than assuming tomorrow's calendar date is a trading day.
+  earliest, rather than assuming tomorrow's calendar date is a trading day. Verified live
+  2026-09-03: the endpoint orders rows by `(expiration_date ASC, strike ASC)`, so
+  selecting the earliest expiry via `min()`/`sorted()` is correct, and is
+  order-independent regardless of that holding. A blanket `next_page_token` truncation
+  guard on this endpoint would be wrong: one expiry's strike list alone exceeds the
+  100-row page cap, so such a guard would fire on every call. `resolve_expiry` instead
+  names truncation only when a requested offset cannot be resolved from the first page.
 - Credentials are read from the environment (`ALPACA_API_KEY_ID`,
   `ALPACA_API_SECRET_KEY`) and never logged. The `alpaca` CLI keeps its own credentials
   in `~/.config/alpaca/profiles/`; this project does not read that store.
