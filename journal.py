@@ -105,11 +105,21 @@ def append(record: dict, path: str) -> None:
     discipline. By the time this is called an order may already be live, so
     dying on a full disk would leave a position with no record anywhere.
     The warning carries the complete record, which makes stderr the fallback
-    journal.
+    journal. If the record contains a non-serializable value, it is printed
+    as repr() to stderr without writing to the file, to avoid corruption.
     """
+    # Serialize first so we can distinguish serialization failure from write failure.
+    try:
+        line = json.dumps(record) + "\n"
+    except (TypeError, ValueError) as exc:
+        print(f"WARNING: could not serialize the record: {exc}", file=sys.stderr)
+        print(repr(record), file=sys.stderr)
+        return
+
+    # If serialization succeeded, try to write.
     try:
         with open(path, "a") as handle:
-            handle.write(json.dumps(record) + "\n")
+            handle.write(line)
     except OSError as exc:
         print(f"WARNING: could not write the journal to {path}: {exc}", file=sys.stderr)
-        print(json.dumps(record), file=sys.stderr)
+        print(line.rstrip("\n"), file=sys.stderr)
