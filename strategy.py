@@ -15,7 +15,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
+from config import StrategyConfig
 from data import OptionQuote
+from features import FeatureSet
 
 
 class Stance(str, Enum):
@@ -145,3 +147,110 @@ def position_size(equity: float, risk_fraction: float, max_loss: float) -> int:
     at or above the width -- so there is no division by zero to guard.
     """
     return math.floor(equity * risk_fraction / max_loss)
+
+
+FEATURE_NAMES = ("spot", "rv20", "spot_over_sma20", "spot_over_sma50", "atm_iv")
+
+
+def _unusable_features(features: FeatureSet) -> list[str]:
+    """Names and reasons for every feature that is not ok."""
+    faults = []
+    for name in FEATURE_NAMES:
+        feature = getattr(features, name)
+        if not feature.usable:
+            faults.append(f"{name} ({feature.status.value}: {feature.detail})")
+    return faults
+
+
+def _leg(quote: OptionQuote, side: str) -> SpreadLeg:
+    return SpreadLeg(
+        symbol=quote.symbol,
+        strike=quote.strike,
+        right=quote.right,
+        side=side,
+        delta=quote.delta,
+        bid=quote.bid,
+        ask=quote.ask,
+    )
+
+
+def build_decision(
+    features: FeatureSet,
+    chain: Sequence[OptionQuote],
+    stance: Stance,
+    equity: float,
+    cfg: StrategyConfig,
+) -> Decision:
+    """Turn a stance into a sized spread, or explain why not.
+
+    The gates run in a deliberate order. The stance is checked first, so a
+    neutral day does not report a data problem it never depended on. The
+    features are checked next, before any strike work, because an unusable
+    spot invalidates the selection that would follow it.
+    """
+    structure = structure_for(stance)
+    if structure is None:
+        return Decision(stance, None, "neutral stance: no directional edge")
+
+    faults = _unusable_features(features)
+    if faults:
+        return Decision(stance, None, f"features not ok: {', '.join(faults)}")
+
+    right = PUT if structure == PUT_CREDIT else CALL
+    short = select_short_leg(chain, right, cfg.delta_target)
+    if short is None:
+        return Decision(
+            stance, None, f"no {right} contract with a usable delta in the chain"
+        )
+
+    width = cfg.spread_width_dollars
+    long = select_long_leg(chain, right, short.strike, width)
+    if long is None:
+        wanted = short.strike - width if right == PUT else short.strike + width
+        return Decision(
+            stance, None, f"no {right} at strike {wanted} to protect the {short.strike} short"
+        )
+
+    credit = net_credit(short, long, width)
+    if credit is None:
+        return Decision(
+            stance,
+            None,
+            f"no usable credit from the {short.strike}/{long.strike} {right} spread",
+        )
+
+    minimum = cfg.min_credit_fraction * width
+    if credit < minimum:
+        return Decision(
+            stance,
+            None,
+            f"credit {credit:.2f} below minimum {minimum:.2f} "
+            f"({cfg.min_credit_fraction:.0%} of {width:.2f} width)",
+        )
+
+    max_loss = max_loss_per_contract(width, credit, cfg.contract_multiplier)
+    budget = equity * cfg.risk_fraction
+    quantity = position_size(equity, cfg.risk_fraction, max_loss)
+    if quantity < 1:
+        return Decision(
+            stance,
+            None,
+            f"max loss {max_loss:.2f} per contract exceeds the {budget:.2f} risk budget",
+        )
+
+    proposal = SpreadProposal(
+        structure=structure,
+        short_leg=_leg(short, SELL),
+        long_leg=_leg(long, BUY),
+        credit=credit,
+        max_loss_per_contract=max_loss,
+        quantity=quantity,
+        total_risk=quantity * max_loss,
+        risk_budget=budget,
+    )
+    return Decision(
+        stance,
+        proposal,
+        f"sell {short.strike}{right} / buy {long.strike}{right} "
+        f"for {credit:.2f}, {quantity} contract(s)",
+    )

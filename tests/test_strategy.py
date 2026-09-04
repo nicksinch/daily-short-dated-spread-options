@@ -1,13 +1,16 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
+from config import StrategyConfig
 from data import OptionQuote
+from features import Feature, FeatureSet
 from strategy import (
     Decision,
     SpreadLeg,
     SpreadProposal,
     Stance,
+    build_decision,
     max_loss_per_contract,
     net_credit,
     position_size,
@@ -17,6 +20,8 @@ from strategy import (
 )
 
 NOW = datetime(2026, 9, 4, 16, 39, tzinfo=timezone.utc)
+
+CFG = StrategyConfig()
 
 
 def a_put(strike, delta, bid=1.60, ask=1.68):
@@ -143,3 +148,131 @@ def test_position_size_is_zero_when_the_budget_cannot_fund_one_contract():
 
 def test_position_size_takes_an_exact_fit():
     assert position_size(100_000.0, 0.01, 500.0) == 2
+
+
+def a_feature_set(**overrides):
+    """All features ok, spot at 765.12. Overrides replace one feature."""
+    fields = dict(
+        spot=Feature.ok(765.12, NOW),
+        rv20=Feature.ok(0.1483, NOW),
+        spot_over_sma20=Feature.ok(1.0121, NOW),
+        spot_over_sma50=Feature.ok(1.0388, NOW),
+        atm_iv=Feature.ok(0.1642, NOW),
+        market_open=True,
+        next_open=NOW,
+        next_close=NOW,
+        expiry=date(2026, 9, 5),
+        as_of=NOW,
+    )
+    return FeatureSet(**{**fields, **overrides})
+
+
+def a_chain():
+    """The worked example: a 0.30-delta short put at 761 with a 756 wing."""
+    return [
+        a_put(763.0, -0.38, bid=2.40, ask=2.50),
+        a_put(761.0, -0.3020, bid=1.60, ask=1.68),
+        a_put(756.0, -0.1810, bid=0.88, ask=0.95),
+        a_call(769.0, 0.2980, bid=1.55, ask=1.63),
+        a_call(774.0, 0.1700, bid=0.80, ask=0.87),
+    ]
+
+
+def test_the_worked_example_produces_the_expected_proposal():
+    decision = build_decision(a_feature_set(), a_chain(), Stance.BULLISH, 100_000.0, CFG)
+    assert decision.will_trade
+    p = decision.proposal
+    assert p.structure == "put_credit"
+    assert (p.short_leg.strike, p.short_leg.side) == (761.0, "sell")
+    assert (p.long_leg.strike, p.long_leg.side) == (756.0, "buy")
+    assert p.short_leg.symbol == "SPY260905P00761000"
+    assert p.credit == pytest.approx(0.65)
+    assert p.max_loss_per_contract == pytest.approx(435.0)
+    assert p.quantity == 2
+    assert p.total_risk == pytest.approx(870.0)
+    assert p.risk_budget == pytest.approx(1000.0)
+
+
+def test_bearish_sells_calls_above_the_market():
+    decision = build_decision(a_feature_set(), a_chain(), Stance.BEARISH, 100_000.0, CFG)
+    assert decision.proposal.structure == "call_credit"
+    assert decision.proposal.short_leg.strike == 769.0
+    assert decision.proposal.long_leg.strike == 774.0
+
+
+def test_neutral_stands_aside_without_touching_the_chain():
+    decision = build_decision(a_feature_set(), a_chain(), Stance.NEUTRAL, 100_000.0, CFG)
+    assert not decision.will_trade
+    assert "neutral" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "override, expected",
+    [
+        ({"atm_iv": Feature.missing("no implied volatility on the 765.0 call")}, "atm_iv"),
+        ({"spot": Feature.stale(765.12, NOW, "180s old, threshold 60s")}, "spot"),
+        ({"rv20": Feature.missing("need 21 settled closes, got 3")}, "rv20"),
+    ],
+)
+def test_a_feature_that_is_not_ok_stands_the_agent_aside(override, expected):
+    decision = build_decision(
+        a_feature_set(**override), a_chain(), Stance.BULLISH, 100_000.0, CFG
+    )
+    assert not decision.will_trade
+    assert expected in decision.reason
+
+
+def test_the_feature_gate_is_checked_before_the_chain():
+    # An unusable spot invalidates the strike search, so the reason must name
+    # the feature rather than the empty chain that follows from it.
+    decision = build_decision(
+        a_feature_set(spot=Feature.missing("no two-sided quote and no trade")),
+        [], Stance.BULLISH, 100_000.0, CFG,
+    )
+    assert "spot" in decision.reason
+
+
+def test_no_usable_delta_stands_aside():
+    chain = [a_put(761.0, None), a_put(756.0, None)]
+    decision = build_decision(a_feature_set(), chain, Stance.BULLISH, 100_000.0, CFG)
+    assert not decision.will_trade
+    assert "delta" in decision.reason
+
+
+def test_a_missing_wing_stands_aside_and_names_the_strike():
+    chain = [a_put(761.0, -0.3020, bid=1.60, ask=1.68), a_put(757.0, -0.22)]
+    decision = build_decision(a_feature_set(), chain, Stance.BULLISH, 100_000.0, CFG)
+    assert not decision.will_trade
+    assert "756" in decision.reason
+
+
+def test_an_unquotable_leg_stands_aside():
+    chain = [
+        a_put(761.0, -0.3020, bid=None, ask=1.68),
+        a_put(756.0, -0.1810, bid=0.88, ask=0.95),
+    ]
+    decision = build_decision(a_feature_set(), chain, Stance.BULLISH, 100_000.0, CFG)
+    assert not decision.will_trade
+    assert "credit" in decision.reason
+
+
+def test_a_credit_below_the_floor_stands_aside():
+    # 1.20 - 0.95 = 0.25, under the 0.50 minimum on a $5 spread.
+    chain = [
+        a_put(761.0, -0.3020, bid=1.20, ask=1.28),
+        a_put(756.0, -0.1810, bid=0.88, ask=0.95),
+    ]
+    decision = build_decision(a_feature_set(), chain, Stance.BULLISH, 100_000.0, CFG)
+    assert not decision.will_trade
+    assert "0.50" in decision.reason
+
+
+def test_a_budget_too_small_for_one_contract_stands_aside():
+    decision = build_decision(a_feature_set(), a_chain(), Stance.BULLISH, 10_000.0, CFG)
+    assert not decision.will_trade
+    assert "435" in decision.reason
+
+
+def test_a_trading_decision_still_explains_itself():
+    decision = build_decision(a_feature_set(), a_chain(), Stance.BULLISH, 100_000.0, CFG)
+    assert "761" in decision.reason and "756" in decision.reason
