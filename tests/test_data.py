@@ -248,3 +248,16 @@ def test_option_chain_sends_an_explicit_limit():
     _, params = session.calls[0]
     assert params["limit"] == 1000
     assert params["feed"] == "indicative"
+
+
+def test_get_account_parses_equity_from_a_json_string():
+    # Alpaca returns the account's numeric fields as JSON strings.
+    client = make_client({"/v2/account": {"equity": "100000.42", "buying_power": "200000"}})
+    assert client.get_account().equity == pytest.approx(100000.42)
+
+
+def test_get_account_hits_the_trading_api():
+    client = make_client({"/v2/account": {"equity": "100000"}})
+    client.get_account()
+    url, _ = client._session.calls[0]
+    assert url == "https://paper-api.alpaca.markets/v2/account"
