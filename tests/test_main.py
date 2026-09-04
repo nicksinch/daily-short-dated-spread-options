@@ -49,15 +49,46 @@ def test_market_context_is_reported_separately_from_features():
     assert "expiry" in text
 
 
-def test_no_module_contains_order_placing_code():
-    # Scope guard: this session builds data and signal only.
-    # Tokens are specific to order placement. "submit" is deliberately not
-    # among them: it collides with the module docstring's "submits nothing".
+def test_only_broker_reaches_an_order_endpoint():
+    # This replaces the old blanket wall. Now that the order layer exists
+    # the property worth guarding is narrower: exactly one module can place
+    # an order, and the mleg vocabulary lives in the pure module that builds
+    # the payload.
     root = pathlib.Path(__file__).parent.parent
-    for module in ("config.py", "data.py", "features.py", "main.py", "strategy.py"):
-        source = (root / module).read_text()
-        for forbidden in ("/v2/orders", "order_class", "mleg", "position_intent"):
-            assert forbidden not in source, f"{module} mentions {forbidden}"
+    modules = (
+        "config.py", "data.py", "features.py", "strategy.py",
+        "orders.py", "broker.py", "journal.py", "main.py",
+    )
+    sources = {name: (root / name).read_text() for name in modules}
+
+    assert "/v2/orders" in sources["broker.py"]
+    for name, source in sources.items():
+        if name != "broker.py":
+            assert "/v2/orders" not in source, f"{name} reaches an order endpoint"
+        if name != "orders.py":
+            for forbidden in ("order_class", "mleg", "position_intent"):
+                assert forbidden not in source, f"{name} mentions {forbidden}"
+
+
+def test_exactly_one_mode_flag_is_required(monkeypatch):
+    with pytest.raises(SystemExit):
+        main_module.main(["--stance", "bullish"])
+
+
+def test_the_two_mode_flags_are_mutually_exclusive(monkeypatch):
+    with pytest.raises(SystemExit):
+        main_module.main(["--dry-run", "--submit", "--stance", "bullish"])
+
+
+def test_the_submit_flag_is_accepted(monkeypatch):
+    # The one gate test that distinguishes the new parser from the old:
+    # before the mutually exclusive group existed, --submit was an
+    # unrecognised argument and this raised SystemExit.
+    client = StubClient(quote=None, trade=None)
+    monkeypatch.setattr(
+        main_module.AlpacaClient, "from_env", classmethod(lambda cls, cfg: client)
+    )
+    assert main_module.main(["--submit", "--stance", "neutral"]) == 0
 
 
 class StubClient:

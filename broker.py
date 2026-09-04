@@ -74,7 +74,7 @@ class Broker:
     def open_orders(self) -> list[list[str]]:
         """Leg symbols for every open order, one list per order.
 
-        `nested=true` is required: an mleg parent order's own `symbol` is the
+        `nested=true` is required: a multi-leg parent order's own `symbol` is the
         empty string and its legs are not returned without the flag, so a
         guard reading the parent symbol would silently never match.
         """

@@ -1,8 +1,12 @@
-"""Dry-run entrypoint for the data and signal layer.
+"""Entrypoint for the daily SPY spread agent.
 
-Fetches market data, computes the features, prints them and exits. It
-constructs no orders and submits nothing; there is no code path from here to
-any order-placing endpoint.
+Fetches market data, computes the features, decides, and either prints the
+order it would place (--dry-run) or places it (--submit). Exactly one of
+those flags is required: there is no default, and no bare invocation that
+trades.
+
+Only `broker.py` can reach an order endpoint, and the --dry-run path returns
+before a Broker is constructed.
 """
 
 import argparse
@@ -73,11 +77,16 @@ def format_decision(decision: Decision) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SPY data and signal layer")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
         "--dry-run",
         action="store_true",
-        required=True,
-        help="fetch data, compute features, print them, exit (the only mode)",
+        help="fetch, compute, print the decision and the order it would place, exit",
+    )
+    mode.add_argument(
+        "--submit",
+        action="store_true",
+        help="do all of --dry-run, then actually place the order",
     )
     parser.add_argument(
         "--stance",
