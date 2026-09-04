@@ -121,7 +121,7 @@ def test_credit_is_the_short_bid_less_the_long_ask():
         (0.0, 0.95, "zero short bid"),
         (0.95, 0.95, "credit is zero"),
         (0.80, 0.95, "credit is negative"),
-        (5.00, 0.00, "credit equals the width"),
+        (5.50, 0.50, "credit equals the width"),
         (6.00, 0.50, "credit exceeds the width"),
     ],
 )

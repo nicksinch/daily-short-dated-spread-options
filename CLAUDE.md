@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-The data and signal layer for a daily SPY option-spread agent, trading in
-Alpaca's paper environment.
+The data, signal and strategy layers for a daily SPY option-spread agent,
+trading in Alpaca's paper environment.
 
 - `config.py` — `FeatureConfig`, every tunable in one frozen dataclass.
 - `data.py` — Alpaca REST access. Returns plain records; raises on HTTP and
@@ -27,7 +27,7 @@ The interpreter is the in-project virtualenv; PyCharm registers it as SDK
 
 ```bash
 source .venv/bin/activate
-python main.py --dry-run
+python main.py --dry-run --stance bullish
 ```
 
 Install dependencies into that venv (`.venv/bin/pip install ...`) rather than system Python,

@@ -53,9 +53,15 @@ def format_decision(decision: Decision) -> str:
     p = decision.proposal
     lines.append(f"decision: trade {p.structure}")
     for leg in (p.short_leg, p.long_leg):
+        # short.ask, long.bid and long.delta play no part in net_credit (see
+        # its docstring) and select_long_leg never inspects greeks, so those
+        # three -- and only those three -- are not guaranteed non-None.
+        delta = "-" if leg.delta is None else f"{leg.delta:+.4f}"
+        bid = "-" if leg.bid is None else f"{leg.bid:.2f}"
+        ask = "-" if leg.ask is None else f"{leg.ask:.2f}"
         lines.append(
             f"  {leg.side:<5} {leg.symbol}  {leg.strike}{leg.right}  "
-            f"delta {leg.delta:+.4f}  bid {leg.bid:.2f}  ask {leg.ask:.2f}"
+            f"delta {delta}  bid {bid}  ask {ask}"
         )
     lines.append(
         f"  credit {p.credit:.2f}  max loss/contract ${p.max_loss_per_contract:.2f}  "
@@ -78,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         type=Stance,
         choices=list(Stance),
+        metavar="{bullish,bearish,neutral}",  # choices renders the enum repr otherwise
         help="directional view; supplied by hand until the LLM layer exists",
     )
     args = parser.parse_args(argv)

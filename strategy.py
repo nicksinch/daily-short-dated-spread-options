@@ -40,9 +40,14 @@ class SpreadLeg:
     strike: float
     right: str  # "C" or "P"
     side: str  # "sell" or "buy"
-    delta: float
-    bid: float
-    ask: float
+    # These three come straight from OptionQuote's float | None fields, and
+    # net_credit's docstring says explicitly that short.ask and long.bid play
+    # no part in the credit; select_long_leg never inspects delta either. So
+    # only the sides the credit actually demands (short.bid, short.delta,
+    # long.ask) are guaranteed present.
+    delta: float | None
+    bid: float | None
+    ask: float | None
 
 
 @dataclass(frozen=True)
