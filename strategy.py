@@ -10,8 +10,11 @@ Standing aside is a value, not an exception: `Decision` carries a reason in
 both directions so a quiet day is as explainable as a busy one.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+
+from data import OptionQuote
 
 
 class Stance(str, Enum):
@@ -73,3 +76,36 @@ def structure_for(stance: Stance) -> str | None:
     if stance is Stance.BEARISH:
         return CALL_CREDIT
     return None
+
+
+def select_short_leg(
+    chain: Sequence[OptionQuote], right: str, delta_target: float
+) -> OptionQuote | None:
+    """The contract whose absolute delta is nearest `delta_target`.
+
+    A delta of zero is treated as absent rather than as a real reading: at
+    0DTE Alpaca omits greeks and the CLI synthesises zeros, and a genuine 0.00
+    would otherwise rank as the furthest strike from the money.
+
+    Ties go to the lower absolute delta -- the further out of the money of two
+    equally-distant strikes, so the arbitrary case is consistently arbitrary.
+    """
+    candidates = [
+        q for q in chain if q.right == right and q.delta is not None and q.delta != 0
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda q: (abs(abs(q.delta) - delta_target), abs(q.delta)))
+
+
+def select_long_leg(
+    chain: Sequence[OptionQuote], right: str, short_strike: float, width: float
+) -> OptionQuote | None:
+    """The protective wing, one width further out of the money.
+
+    Exact float comparison is safe: strikes are integer thousandths divided by
+    1000, and a $5.00 offset from any strike on SPY's grid is exact. Returns
+    None when that strike is not in the fetched band.
+    """
+    wanted = short_strike - width if right == PUT else short_strike + width
+    return next((q for q in chain if q.right == right and q.strike == wanted), None)
