@@ -63,6 +63,11 @@ class StockTrade:
 
 
 @dataclass(frozen=True)
+class Account:
+    equity: float
+
+
+@dataclass(frozen=True)
 class OptionQuote:
     symbol: str
     strike: float
@@ -135,6 +140,16 @@ class AlpacaClient:
             next_open=_timestamp(payload["next_open"]),
             next_close=_timestamp(payload["next_close"]),
         )
+
+    def get_account(self) -> Account:
+        """Current account equity.
+
+        No `None` path: the account always exists, so an HTTP failure raises
+        like every other transport problem here. Alpaca returns this
+        endpoint's numeric fields as JSON strings.
+        """
+        payload = self._get(self.TRADING_URL, "/v2/account")
+        return Account(equity=float(payload["equity"]))
 
     def get_daily_bars(self, symbol: str, today: date) -> list[DailyBar]:
         """Settled daily bars only.

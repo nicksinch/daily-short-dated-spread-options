@@ -5,9 +5,10 @@ import pytest
 
 import main as main_module
 from config import FeatureConfig
-from data import MarketClock, StockQuote, StockTrade
+from data import Account, DailyBar, MarketClock, OptionQuote, StockQuote, StockTrade
 from features import Feature, FeatureSet
-from main import format_feature_set
+from main import format_decision, format_feature_set
+from strategy import Decision, SpreadLeg, SpreadProposal, Stance
 
 NOW = datetime(2026, 9, 3, 15, 36, tzinfo=timezone.utc)
 
@@ -53,18 +54,24 @@ def test_no_module_contains_order_placing_code():
     # Tokens are specific to order placement. "submit" is deliberately not
     # among them: it collides with the module docstring's "submits nothing".
     root = pathlib.Path(__file__).parent.parent
-    for module in ("config.py", "data.py", "features.py", "main.py"):
+    for module in ("config.py", "data.py", "features.py", "main.py", "strategy.py"):
         source = (root / module).read_text()
         for forbidden in ("/v2/orders", "order_class", "mleg", "position_intent"):
             assert forbidden not in source, f"{module} mentions {forbidden}"
 
 
 class StubClient:
-    """Records what main() asks for. Performs no I/O."""
+    """Records what main() asks for. Performs no I/O.
 
-    def __init__(self, quote, trade):
+    `bars` and `chain` default to empty, matching the previous fixed
+    behaviour, so the tests that only inspect `chain_calls` are unaffected.
+    """
+
+    def __init__(self, quote, trade, bars=None, chain=None):
         self._quote = quote
         self._trade = trade
+        self._bars = [] if bars is None else bars
+        self._chain = [] if chain is None else chain
         self.chain_calls = []
 
     def get_clock(self):
@@ -74,7 +81,7 @@ class StubClient:
         )
 
     def get_daily_bars(self, symbol, today):
-        return []
+        return self._bars
 
     def get_latest_quote(self, symbol):
         return self._quote
@@ -87,13 +94,16 @@ class StubClient:
 
     def get_option_chain(self, symbol, expiry, strike_lo, strike_hi):
         self.chain_calls.append((symbol, expiry, strike_lo, strike_hi))
-        return []
+        return self._chain
+
+    def get_account(self):
+        return Account(equity=100_000.0)
 
 
-def run_main_with(monkeypatch, quote, trade):
-    client = StubClient(quote, trade)
+def run_main_with(monkeypatch, quote, trade, stance="neutral", bars=None, chain=None):
+    client = StubClient(quote, trade, bars=bars, chain=chain)
     monkeypatch.setattr(main_module.AlpacaClient, "from_env", classmethod(lambda cls, cfg: client))
-    assert main_module.main(["--dry-run"]) == 0
+    assert main_module.main(["--dry-run", "--stance", stance]) == 0
     return client
 
 
@@ -128,3 +138,163 @@ def test_chain_band_falls_back_to_the_last_trade(monkeypatch):
     )
     band = FeatureConfig().strike_band_dollars
     assert client.chain_calls == [("SPY", date(2026, 9, 4), 772 - band, 772 + band)]
+
+
+def a_proposal():
+    return SpreadProposal(
+        structure="put_credit",
+        short_leg=SpreadLeg("SPY260905P00761000", 761.0, "P", "sell", -0.3020, 1.60, 1.68),
+        long_leg=SpreadLeg("SPY260905P00756000", 756.0, "P", "buy", -0.1810, 0.88, 0.95),
+        credit=0.65, max_loss_per_contract=435.0, quantity=2,
+        total_risk=870.0, risk_budget=1000.0,
+    )
+
+
+def test_a_trade_prints_both_legs_and_the_sizing():
+    text = format_decision(Decision(Stance.BULLISH, a_proposal(), "sell 761.0P / buy 756.0P"))
+    assert "put_credit" in text
+    assert "SPY260905P00761000" in text and "SPY260905P00756000" in text
+    assert "sell" in text and "buy" in text
+    assert "0.65" in text and "435.00" in text and "870.00" in text
+    assert "quantity 2" in text
+
+
+def test_standing_aside_prints_the_reason_in_place_of_legs():
+    text = format_decision(
+        Decision(Stance.NEUTRAL, None, "neutral stance: no directional edge")
+    )
+    assert "stand aside" in text
+    assert "neutral stance" in text
+    assert "SPY26" not in text
+
+
+def test_the_stance_flag_is_required(monkeypatch):
+    monkeypatch.setattr(
+        main_module.AlpacaClient, "from_env",
+        classmethod(lambda cls, cfg: StubClient(None, None)),
+    )
+    with pytest.raises(SystemExit):
+        main_module.main(["--dry-run"])
+
+
+def test_an_unknown_stance_is_rejected(monkeypatch):
+    monkeypatch.setattr(
+        main_module.AlpacaClient, "from_env",
+        classmethod(lambda cls, cfg: StubClient(None, None)),
+    )
+    with pytest.raises(SystemExit):
+        main_module.main(["--dry-run", "--stance", "sideways"])
+
+
+def test_the_dry_run_reaches_the_decision(monkeypatch, capsys):
+    run_main_with(
+        monkeypatch,
+        quote=StockQuote(bid=766.0, ask=767.0, bid_size=1, ask_size=1, timestamp=NOW),
+        trade=None,
+        stance="bullish",
+    )
+    assert "decision:" in capsys.readouterr().out
+
+
+def daily_bars(count, newest):
+    """`count` ascending settled bars, the newest dated `newest`.
+
+    Only the newest date and the count matter to the gates that consume
+    these (bar_freshness and the rv20/sma window lengths); the prices just
+    need to vary enough to produce a real (non-zero) realised volatility.
+    """
+    return [
+        DailyBar(
+            date=newest - timedelta(days=count - 1 - i),
+            open=750.0, high=751.0, low=749.0, close=750.0 + i * 0.1, volume=1_000_000,
+        )
+        for i in range(count)
+    ]
+
+
+def a_full_chain():
+    """Enough of a chain to price atm_iv and fill a bullish put credit
+    spread -- the worked example from the design spec, spot near 765.25."""
+    return [
+        OptionQuote(
+            "SPY260905C00765000", 765.0, "C",
+            bid=1.50, ask=1.58, iv=0.1650, delta=0.50, timestamp=NOW,
+        ),
+        OptionQuote(
+            "SPY260905P00765000", 765.0, "P",
+            bid=1.45, ask=1.53, iv=0.1620, delta=-0.50, timestamp=NOW,
+        ),
+        OptionQuote(
+            "SPY260905P00761000", 761.0, "P",
+            bid=1.60, ask=1.68, iv=0.1700, delta=-0.3020, timestamp=NOW,
+        ),
+        OptionQuote(
+            "SPY260905P00756000", 756.0, "P",
+            bid=0.88, ask=0.95, iv=0.1500, delta=-0.1810, timestamp=NOW,
+        ),
+    ]
+
+
+def a_chain_with_a_one_sided_wing():
+    """Same trade as `a_full_chain`, but the far wing -- the contract most
+    likely to come back thin on the free indicative feed -- is quoted
+    one-sided and without a delta, and the short leg has no ask. None of
+    those three sides is demanded by the credit, so the trade should still
+    go through."""
+    return [
+        OptionQuote(
+            "SPY260905C00765000", 765.0, "C",
+            bid=1.50, ask=1.58, iv=0.1650, delta=0.50, timestamp=NOW,
+        ),
+        OptionQuote(
+            "SPY260905P00765000", 765.0, "P",
+            bid=1.45, ask=1.53, iv=0.1620, delta=-0.50, timestamp=NOW,
+        ),
+        OptionQuote(
+            "SPY260905P00761000", 761.0, "P",
+            bid=1.60, ask=None, iv=0.1700, delta=-0.3020, timestamp=NOW,
+        ),
+        OptionQuote(
+            "SPY260905P00756000", 756.0, "P",
+            bid=None, ask=0.95, iv=0.1500, delta=None, timestamp=NOW,
+        ),
+    ]
+
+
+def run_main_to_a_trade(monkeypatch, chain):
+    today = datetime.now(main_module.EASTERN).date()
+    bars = daily_bars(FeatureConfig().sma_long_window + 1, today - timedelta(days=1))
+    return run_main_with(
+        monkeypatch,
+        quote=StockQuote(bid=765.00, ask=765.50, bid_size=1, ask_size=1, timestamp=NOW),
+        trade=None,
+        stance="bullish",
+        bars=bars,
+        chain=chain,
+    )
+
+
+def test_main_prints_a_real_trade_end_to_end(monkeypatch, capsys):
+    # The three existing chain-band tests only ever reach the stand-aside
+    # branch (StubClient's default chain is empty); this drives the whole
+    # pipeline through a genuine proposal.
+    run_main_to_a_trade(monkeypatch, a_full_chain())
+    text = capsys.readouterr().out
+    assert "decision: trade put_credit" in text
+    assert "SPY260905P00761000" in text and "SPY260905P00756000" in text
+    assert "credit 0.65" in text
+    assert "quantity 2" in text
+
+
+def test_a_one_sided_wing_still_prints_a_decision(monkeypatch, capsys):
+    # Regression for the finding that format_decision raised TypeError on a
+    # VALID proposal: short.ask, long.bid and long.delta are never demanded
+    # by the credit calculation and so are the fields most likely to be
+    # absent on the far-OTM wing on the free indicative feed.
+    run_main_to_a_trade(monkeypatch, a_chain_with_a_one_sided_wing())
+    text = capsys.readouterr().out
+    assert "decision: trade put_credit" in text
+    short_line = next(l for l in text.splitlines() if "SPY260905P00761000" in l)
+    long_line = next(l for l in text.splitlines() if "SPY260905P00756000" in l)
+    assert "ask -" in short_line and "bid 1.60" in short_line
+    assert "delta -" in long_line and "bid -" in long_line and "ask 0.95" in long_line

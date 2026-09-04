@@ -3,7 +3,7 @@ from datetime import timedelta
 
 import pytest
 
-from config import FeatureConfig
+from config import FeatureConfig, StrategyConfig
 
 
 def test_defaults_match_the_design():
@@ -19,8 +19,7 @@ def test_defaults_match_the_design():
     assert cfg.option_feed == "indicative"
     assert cfg.stock_feed == "iex"
     assert cfg.bar_feed == "sip"
-    assert cfg.strike_band_dollars == 8
-    assert cfg.delta_target == 0.30
+    assert cfg.strike_band_dollars == 20
     assert cfg.bar_lookback_days == 120
 
 
@@ -28,3 +27,23 @@ def test_config_is_frozen():
     cfg = FeatureConfig()
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.rv_window = 5
+
+
+def test_feature_config_no_longer_carries_the_delta_target():
+    # It moved to StrategyConfig, which is the layer that uses it.
+    assert not hasattr(FeatureConfig(), "delta_target")
+
+
+def test_strategy_defaults_match_the_design():
+    cfg = StrategyConfig()
+    assert cfg.delta_target == 0.30
+    assert cfg.spread_width_dollars == 5.0
+    assert cfg.risk_fraction == 0.01
+    assert cfg.min_credit_fraction == 0.10
+    assert cfg.contract_multiplier == 100
+
+
+def test_strategy_config_is_frozen():
+    cfg = StrategyConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.delta_target = 0.5
