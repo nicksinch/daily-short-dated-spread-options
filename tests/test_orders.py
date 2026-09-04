@@ -1,5 +1,7 @@
+import pytest
+
 from config import OrderConfig
-from orders import build_order
+from orders import build_order, OrderState, classify
 from strategy import SpreadLeg, SpreadProposal
 
 SHORT = SpreadLeg(
@@ -63,3 +65,33 @@ def test_the_short_leg_comes_first():
 def test_the_limit_price_is_rounded_to_a_penny():
     payload = build_order(a_proposal(credit=0.6549), OrderConfig())
     assert payload["limit_price"] == "-0.65"
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["canceled", "expired", "rejected", "suspended", "done_for_day", "replaced"],
+)
+def test_terminal_failures_are_dead(status):
+    assert classify(status) is OrderState.DEAD
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["new", "accepted", "pending_new", "accepted_for_bidding", "held",
+     "pending_cancel", "pending_replace", "stopped", "calculated"],
+)
+def test_non_terminal_statuses_keep_working(status):
+    assert classify(status) is OrderState.WORKING
+
+
+def test_filled_is_filled():
+    assert classify("filled") is OrderState.FILLED
+
+
+def test_a_partial_fill_is_still_working():
+    # A two-spread order can fill one spread; the rest may still arrive.
+    assert classify("partially_filled") is OrderState.WORKING
+
+
+def test_an_unfamiliar_status_keeps_working_rather_than_looking_filled():
+    assert classify("something_alpaca_added_later") is OrderState.WORKING

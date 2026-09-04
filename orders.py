@@ -7,6 +7,8 @@ a socket.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 
 from config import OrderConfig
 from strategy import SpreadProposal
@@ -52,3 +54,40 @@ def build_order(proposal: SpreadProposal, cfg: OrderConfig) -> dict:
             for leg in (proposal.short_leg, proposal.long_leg)
         ],
     }
+
+
+class OrderState(str, Enum):
+    """What the program does about a status, not what the status is called."""
+
+    FILLED = "filled"    # done, we are on
+    WORKING = "working"  # not terminal; keep polling
+    DEAD = "dead"        # terminal without a fill
+
+
+_FILLED = {"filled"}
+_DEAD = {"canceled", "expired", "rejected", "suspended", "done_for_day", "replaced"}
+
+
+@dataclass(frozen=True)
+class OrderRecord:
+    id: str
+    status: str  # Alpaca's own string, preserved rather than normalised
+    state: OrderState
+    filled_qty: float
+    filled_avg_price: float | None
+    submitted_at: datetime | None
+
+
+def classify(status: str) -> OrderState:
+    """What to do about an Alpaca order status.
+
+    Anything not known to be terminal is WORKING, so a status Alpaca adds
+    later keeps the poll running rather than being mistaken for a fill.
+    `partially_filled` is WORKING deliberately: a two-spread order can fill
+    one spread, and the remainder may still arrive.
+    """
+    if status in _FILLED:
+        return OrderState.FILLED
+    if status in _DEAD:
+        return OrderState.DEAD
+    return OrderState.WORKING
