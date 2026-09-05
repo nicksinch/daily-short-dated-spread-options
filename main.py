@@ -1,18 +1,26 @@
-"""Dry-run entrypoint for the data and signal layer.
+"""Entrypoint for the daily SPY spread agent.
 
-Fetches market data, computes the features, prints them and exits. It
-constructs no orders and submits nothing; there is no code path from here to
-any order-placing endpoint.
+Fetches market data, computes the features, decides, and either prints the
+order it would place (--dry-run) or places it (--submit). Exactly one of
+those flags is required: there is no default, and no bare invocation that
+trades.
+
+Only `broker.py` can reach an order endpoint, and the --dry-run path returns
+before a Broker is constructed.
 """
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from config import FeatureConfig, StrategyConfig
+from broker import Broker
+from config import FeatureConfig, OrderConfig, StrategyConfig
 from data import AlpacaClient
 from features import FeatureSet, build_feature_set, spot_feature
+from journal import DRY_RUN, SUBMIT, append, build_record
+from orders import OrderState, build_order, existing_exposure
 from strategy import Decision, Stance, build_decision
 
 EASTERN = ZoneInfo("America/New_York")
@@ -71,13 +79,31 @@ def format_decision(decision: Decision) -> str:
     return "\n".join(lines)
 
 
+def format_order(payload: dict) -> str:
+    """The order exactly as it would be sent."""
+    return json.dumps(payload, indent=2)
+
+
+def format_outcome(record) -> str:
+    price = "-" if record.filled_avg_price is None else f"{record.filled_avg_price:.2f}"
+    return (
+        f"order {record.id}: {record.status} ({record.state.value})  "
+        f"filled {record.filled_qty:g} at {price}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SPY data and signal layer")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
         "--dry-run",
         action="store_true",
-        required=True,
-        help="fetch data, compute features, print them, exit (the only mode)",
+        help="fetch, compute, print the decision and the order it would place, exit",
+    )
+    mode.add_argument(
+        "--submit",
+        action="store_true",
+        help="do all of --dry-run, then actually place the order",
     )
     parser.add_argument(
         "--stance",
@@ -123,7 +149,51 @@ def main(argv: list[str] | None = None) -> int:
     print()
     decision = build_decision(features, chain, args.stance, account.equity, strategy_cfg)
     print(format_decision(decision))
-    return 0
+
+    order_cfg = OrderConfig()
+    mode = DRY_RUN if args.dry_run else SUBMIT
+    context = dict(
+        now=now, mode=mode, underlying=cfg.underlying, expiry=expiry,
+        features=features, decision=decision,
+    )
+
+    if decision.proposal is None:
+        append(build_record(**context), order_cfg.journal_path)
+        return 0
+
+    payload = build_order(decision.proposal, order_cfg)
+    print()
+    print(format_order(payload))
+
+    if args.dry_run:
+        append(build_record(**context), order_cfg.journal_path)
+        return 0
+
+    # Everything below is the only path in this program that trades.
+    broker = Broker.from_env(order_cfg)
+    blocked = existing_exposure(
+        broker.open_option_positions(), broker.open_orders(), cfg.underlying, expiry
+    )
+    if blocked:
+        print(f"\nnot submitting: {blocked}")
+        append(build_record(**context), order_cfg.journal_path)
+        return 0
+
+    submitted = broker.submit(payload)
+    try:
+        outcome = broker.await_fill(submitted.id)
+    except Exception as exc:  # noqa: BLE001 - the order is already live; record
+        # whatever we have rather than let a poll failure (429, 500, a socket
+        # timeout) propagate past the append below and leave a live position
+        # with no record anywhere.
+        print(f"\nWARNING: could not confirm the fill: {exc}", file=sys.stderr)
+        outcome = submitted
+    print(f"\n{format_outcome(outcome)}")
+    append(
+        build_record(payload=payload, record=outcome, **context),
+        order_cfg.journal_path,
+    )
+    return 0 if outcome.state is OrderState.FILLED else 1
 
 
 if __name__ == "__main__":
