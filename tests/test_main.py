@@ -16,6 +16,15 @@ from strategy import Decision, SpreadLeg, SpreadProposal, Stance
 NOW = datetime(2026, 9, 3, 15, 36, tzinfo=timezone.utc)
 
 
+class FrozenDatetime(datetime):
+    """main() reads the wall clock; pinning it to NOW keeps the fixed
+    fixtures below from going stale as real time moves on."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return NOW.astimezone(tz)
+
+
 def a_feature_set():
     return FeatureSet(
         spot=Feature.ok(766.46, NOW, "one-sided quote, used last trade"),
@@ -143,6 +152,7 @@ def run_main_with(
     monkeypatch.setattr(
         main_module.AlpacaClient, "from_env", classmethod(lambda cls, cfg: client)
     )
+    monkeypatch.setattr(main_module, "datetime", FrozenDatetime)
     if journal_path is None:
         monkeypatch.setattr(main_module, "append", lambda record, path: None)
     else:
@@ -460,7 +470,7 @@ def a_chain_with_a_one_sided_wing():
 
 
 def run_main_to_a_trade(monkeypatch, chain):
-    today = datetime.now(main_module.EASTERN).date()
+    today = NOW.astimezone(main_module.EASTERN).date()
     bars = daily_bars(FeatureConfig().sma_long_window + 1, today - timedelta(days=1))
     return run_main_with(
         monkeypatch,

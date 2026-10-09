@@ -174,79 +174,170 @@ Our strategy uses **credit spreads**.
 
 ---
 
-## 5. Example: Bullish
+## 5. Example: Bullish (Put Credit Spread)
 
-Suppose:
-
-```text
-SPY = $773
-```
-
-The agent is bullish.
-
-It could construct:
+Both examples use the same starting point, taken from a real dry run of the agent:
 
 ```text
-SELL  780 Put
-BUY   775 Put
+SPY spot        = $772.15
+Expiry          = next trading day (1DTE)
+Account equity  = $99,996.63
+Risk budget     = 1% of equity = $999.97
 ```
 
-The short put is closer to the current price and the long put provides protection below it.
+The option quotes below are illustrative, chosen so that the numbers match that run.
+Section 8 explains the sizing rules and section 9 the minimum credit.
 
-Visually:
+### Step 1: Pick the legs
+
+The agent is **bullish**, so it sells a put below spot and buys a cheaper put $5 further down as protection.
+
+| Leg   | Contract | Strike | Delta | Bid  | Ask  |
+| ----- | -------- | ------ | ----- | ---- | ---- |
+| SELL  | 769 Put  | 769    | −0.30 | 1.12 | 1.16 |
+| BUY   | 764 Put  | 764    | −0.18 | 0.37 | 0.39 |
 
 ```text
-        SPY
-         ↓
-----|----|----|----|----|---->
-   760  765  770  773  780
+           BUY 764P          SELL 769P        SPY
+              ↓                  ↓             ↓
+-----|--------|------------------|-------------|----->
+    760      764                769          772.15
 
-                   SELL 780P
-                       ↓
-              BUY 775P
-                  ↓
+      max loss zone  |  partial loss  |   full profit zone
+       (below 764)   |  (764 – 768.27)|   (above 769)
 ```
 
-The idea is:
+### Step 2: Credit, risk and size
 
-> SPY doesn't need to go up dramatically. We mainly want it to stay above the short put strike.
+```text
+Credit (conservative) = short bid − long ask
+                      = 1.12 − 0.39
+                      = $0.73 per share  →  $73 per spread
+
+Minimum credit check  = 0.73 ≥ 0.50 (10% of $5)  ✓
+
+Max loss per spread   = (width − credit) × 100
+                      = (5.00 − 0.73) × 100
+                      = $427
+
+Contracts             = floor(999.97 / 427) = floor(2.34) = 2
+
+Max profit (total)    = 0.73 × 100 × 2 = $146
+Max loss   (total)    = 427 × 2        = $854   (≤ $999.97 budget ✓)
+Breakeven at expiry   = short strike − credit = 769 − 0.73 = $768.27
+```
+
+The order is a single multi-leg limit order for 2 spreads with `limit_price = -0.73`
+(negative because it is a credit).
+
+### Step 3: Profit and loss at expiry
+
+Assumptions for the cost lines:
+
+* **Fees:** Alpaca charges no commission on options, but small regulatory and clearing
+  fees apply per contract. We assume **$0.05 per contract per leg**, so
+  2 spreads × 2 legs = **$0.20 to open** and another $0.20 if the spread has to be
+  closed. Check Alpaca's current fee schedule for exact values.
+* **Tax:** SPY options are equity options. They do **not** get the 60/40 treatment that
+  index options like SPX do, so a 1-day trade is a **short-term capital gain**, taxed as
+  ordinary income. We assume a **24%** US federal rate and ignore state tax.
+  A loss offsets other capital gains, so at 24% it saves 24% of the loss in tax.
+* Paper trading has no real fees or tax. These lines show what the same trade would
+  cost with real money.
+
+| SPY at expiry          | Short 769P worth | Gross PnL                         | Fees   | Pre-tax PnL | Tax (24%) | After-tax PnL |
+| ---------------------- | ---------------- | --------------------------------- | ------ | ----------- | --------- | ------------- |
+| $775.00 (above 769)    | 0.00             | +0.73 × 100 × 2 = **+$146.00**    | −$0.20 | +$145.80    | −$34.99   | **+$110.81**  |
+| $768.27 (breakeven)    | 0.73             | (0.73 − 0.73) × 200 = **$0.00**   | −$0.40 | −$0.40      | +$0.10    | **−$0.30**    |
+| $766.00 (between)      | 3.00             | (0.73 − 3.00) × 200 = **−$454.00** | −$0.40 | −$454.40    | +$109.06  | **−$345.34**  |
+| $760.00 (below 764)    | 9.00 (long 4.00) | (0.73 − 5.00) × 200 = **−$854.00** | −$0.40 | −$854.40    | +$205.06  | **−$649.34**  |
+
+How to read a row, for example **$766.00**:
+
+```text
+Short 769P intrinsic value = 769 − 766 = $3.00
+Long  764P                 = worthless (766 > 764)
+Loss per share             = 3.00 − 0.73 credit = $2.27
+Gross PnL                  = −2.27 × 100 × 2 = −$454.00
+Fees                       = $0.20 open + $0.20 close = −$0.40
+Pre-tax PnL                = −$454.40
+Tax effect                 = 454.40 × 24% = $109.06 saved (against other gains)
+After-tax PnL              = −454.40 + 109.06 = −$345.34
+```
+
+> SPY doesn't need to rally. The trade keeps the full credit as long as SPY stays above **769**.
+
+Note the asymmetry: the best case is **+$146**, the worst case is **−$854**. In exchange, a
+0.30-delta short put finishes out of the money roughly 70% of the time.
 
 ---
 
-## 6. Example: Bearish
+## 6. Example: Bearish (Call Credit Spread)
 
-Suppose:
+Same starting point: SPY = $772.15, 1DTE, a $999.97 risk budget.
 
-```text
-SPY = $773
-```
+### Step 1: Pick the legs
 
-The agent is bearish.
+The agent is **bearish**, so it sells a call above spot and buys a cheaper call $5 further up as protection.
 
-It could construct:
-
-```text
-SELL  780 Call
-BUY   785 Call
-```
-
-Visually:
+| Leg   | Contract | Strike | Delta | Bid  | Ask  |
+| ----- | -------- | ------ | ----- | ---- | ---- |
+| SELL  | 776 Call | 776    | 0.30  | 0.98 | 1.02 |
+| BUY   | 781 Call | 781    | 0.15  | 0.30 | 0.33 |
 
 ```text
-----|----|----|----|----|----|---->
-   770  773  775  780  785
+   SPY             SELL 776C           BUY 781C
+    ↓                  ↓                  ↓
+----|------------------|------------------|--------|---->
+ 772.15               776                781      785
 
-                    SELL 780C
-                        ↓
-                         BUY 785C
-                             ↓
+   full profit zone  |  partial loss  |  max loss zone
+     (below 776)     | (776 – 781)    |   (above 781)
 ```
 
-The idea is:
+### Step 2: Credit, risk and size
 
-> SPY doesn't need to crash. We mainly want it to stay below the short call strike.
+```text
+Credit (conservative) = short bid − long ask
+                      = 0.98 − 0.33
+                      = $0.65 per share  →  $65 per spread
 
-**Important:** `BUY 775C + SELL 780C` would be a bullish call debit spread, not a bearish call credit spread.
+Minimum credit check  = 0.65 ≥ 0.50  ✓
+
+Max loss per spread   = (5.00 − 0.65) × 100 = $435
+
+Contracts             = floor(999.97 / 435) = floor(2.30) = 2
+
+Max profit (total)    = 0.65 × 100 × 2 = $130
+Max loss   (total)    = 435 × 2        = $870   (≤ $999.97 budget ✓)
+Breakeven at expiry   = short strike + credit = 776 + 0.65 = $776.65
+```
+
+### Step 3: Profit and loss at expiry
+
+Same fee and tax assumptions as the bullish example.
+
+| SPY at expiry          | Short 776C worth  | Gross PnL                          | Fees   | Pre-tax PnL | Tax (24%) | After-tax PnL |
+| ---------------------- | ----------------- | ---------------------------------- | ------ | ----------- | --------- | ------------- |
+| $770.00 (below 776)    | 0.00              | +0.65 × 100 × 2 = **+$130.00**     | −$0.20 | +$129.80    | −$31.15   | **+$98.65**   |
+| $776.65 (breakeven)    | 0.65              | (0.65 − 0.65) × 200 = **$0.00**    | −$0.40 | −$0.40      | +$0.10    | **−$0.30**    |
+| $778.00 (between)      | 2.00              | (0.65 − 2.00) × 200 = **−$270.00** | −$0.40 | −$270.40    | +$64.90   | **−$205.50**  |
+| $785.00 (above 781)    | 9.00 (long 4.00)  | (0.65 − 5.00) × 200 = **−$870.00** | −$0.40 | −$870.40    | +$208.90  | **−$661.50**  |
+
+> SPY doesn't need to crash. The trade keeps the full credit as long as SPY stays below **776**.
+
+**Important:** `BUY 775C + SELL 780C` would be a bullish call debit spread, not a bearish
+call credit spread. For a bearish credit spread the call you **sell** is always the one
+**closer** to spot.
+
+### What happens to an in-the-money spread
+
+If SPY finishes between the strikes, the short leg is in the money and the long leg is
+not, so the short leg can be **assigned**. For the bullish example, that means buying
+200 SPY shares at $769, about $153,800, far more than the account's risk budget.
+The agent does not close positions yet, so in practice a threatened spread should be closed
+by hand before the market closes on expiry day (see `alpaca position close` in section 10).
+The "between" rows above assume it is closed at intrinsic value.
 
 ---
 
@@ -256,13 +347,17 @@ The strategy intentionally keeps strike selection simple.
 
 ### Expiration
 
-Target approximately:
+Trade the next expiry after today:
 
 ```text
-30 DTE
+1 DTE
 ```
 
 (DTE = days to expiration)
+
+Why not 0DTE? Alpaca returns no greeks and no implied volatility for same-day
+contracts on any feed, so the 0.30-delta rule below would have nothing to work with.
+At 1DTE both are populated on the free indicative feed.
 
 ### Short Strike
 
@@ -286,12 +381,12 @@ For example:
 
 ```text
 Bullish:
-SELL 780P
-BUY  775P
+SELL 769P
+BUY  764P
 
 Bearish:
-SELL 780C
-BUY  785C
+SELL 776C
+BUY  781C
 ```
 
 This keeps the strategy easy to understand and avoids over-optimizing the strike selection.
@@ -377,6 +472,82 @@ Credit ≥ $0.50 → eligible
 ```
 
 This prevents taking trades where the potential reward is tiny compared with the defined risk.
+
+---
+
+## 10. Alpaca CLI Cheat Sheet
+
+The `alpaca` CLI is the quickest way to check by hand
+what the agent sees and does. These are the commands that matter for this strategy.
+Contract symbols follow the OCC format: `SPY261012P00769000` = SPY, 2026-10-12, **P**ut, strike 769.000.
+
+### Setup and sanity checks
+
+```bash
+alpaca profile login        # authenticate (use the paper-trading keys)
+alpaca doctor               # check configuration and connectivity
+alpaca clock                # is the market open? next open / close
+alpaca calendar --start 2026-10-01 --end 2026-10-31   # trading days (find the 1DTE expiry)
+alpaca account get          # equity, buying power (the 1% risk budget comes from equity)
+```
+
+### Market data (the features)
+
+```bash
+# SPY spot. The agent uses IEX, which can be one-sided outside regular hours
+alpaca data latest-quote --symbol SPY --feed iex
+
+# Daily bars for SMA20 / SMA50 / RV20
+alpaca data bars --symbol SPY --timeframe 1Day --start 2026-06-01
+
+# Option chain with greeks and IV for the next expiry.
+# Always pass --feed indicative: the CLI defaults to opra, which this plan cannot use.
+alpaca data option chain --underlying-symbol SPY --expiration-date 2026-10-12 \
+  --type put --strike-price-gte 750 --strike-price-lte 775 --feed indicative
+
+# Quotes for the two legs of a specific spread
+alpaca data option snapshot --symbols SPY261012P00769000,SPY261012P00764000 --feed indicative
+```
+
+At 0DTE the CLI shows `greeks: {delta: 0, ...}`. Those zeros are made up by the CLI:
+the API returns no greeks at all for same-day contracts, which is why the agent trades 1DTE.
+
+### Orders
+
+```bash
+# Preview the exact multi-leg order the agent places (--dry-run prints it and submits nothing)
+alpaca order submit --order-class mleg --qty 2 --type limit --limit-price -0.73 \
+  --time-in-force day --dry-run --legs '[
+    {"symbol":"SPY261012P00769000","ratio_qty":"1","side":"sell","position_intent":"sell_to_open"},
+    {"symbol":"SPY261012P00764000","ratio_qty":"1","side":"buy","position_intent":"buy_to_open"}]'
+
+alpaca order list --status all --nested --limit 10   # recent orders, legs grouped under each spread
+alpaca order get --order-id <id> --nested            # one order and its fill
+alpaca order cancel --order-id <id>                  # pull an unfilled order
+```
+
+The limit price is **negative** for a credit. A positive price on a credit spread is
+read as a debit: it is not rejected, and it can fill with you paying instead of receiving.
+
+### Positions and results
+
+```bash
+alpaca position list                                   # open legs, market value, unrealized PnL
+alpaca position close --symbol-or-asset-id SPY261012P00769000   # close the short leg first...
+alpaca position close --symbol-or-asset-id SPY261012P00764000   # ...then the long leg
+alpaca account activity list-by-type --activity-type FILL --after 2026-10-01   # fills, for PnL
+alpaca account portfolio                               # equity over time
+```
+
+Closing the short leg first means you are never left holding an uncovered short option.
+
+### Useful flags
+
+```bash
+--jq '<expr>'   # filter JSON output, e.g. alpaca account get --jq '.equity'
+--csv           # CSV output, handy for spreadsheets
+--schema        # show the response schema without calling the API
+```
 
 ---
 
