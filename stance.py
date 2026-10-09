@@ -68,11 +68,12 @@ def build_prompt(features: FeatureSet) -> str:
 
 
 def anthropic_client(cfg: StanceConfig) -> anthropic.Anthropic:
-    """Read the key explicitly, as the Alpaca clients do, so a missing key
-    fails here rather than as a TypeError inside the first request."""
-    return anthropic.Anthropic(
-        api_key=os.environ["ANTHROPIC_API_KEY"], timeout=cfg.timeout_seconds
-    )
+    """Read the key explicitly, as the Alpaca clients do, so a missing or
+    empty key fails here rather than as a TypeError inside the first request."""
+    key = os.environ["ANTHROPIC_API_KEY"]
+    if not key:
+        raise KeyError("ANTHROPIC_API_KEY")
+    return anthropic.Anthropic(api_key=key, timeout=cfg.timeout_seconds)
 
 
 def ask_stance(features: FeatureSet, cfg: StanceConfig, client) -> StanceCall:

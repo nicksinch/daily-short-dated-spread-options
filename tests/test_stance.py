@@ -100,6 +100,12 @@ def test_a_missing_api_key_fails_at_construction(monkeypatch):
         anthropic_client(StanceConfig())
 
 
+def test_an_empty_api_key_fails_at_construction(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    with pytest.raises(KeyError, match="ANTHROPIC_API_KEY"):
+        anthropic_client(StanceConfig())
+
+
 def test_the_client_takes_its_timeout_from_config(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     assert anthropic_client(StanceConfig()).timeout == 60.0
