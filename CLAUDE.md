@@ -72,4 +72,4 @@ Two findings constrain the design; both are documented in
   but badly wrong price, so `spot_feature` rejects one-sided quotes.
 
 ## Constraints
-- always prefer simple code => adopt simplicity, don't overengineer and do not add unnecessary features/complications unless asked to do so.
+- always prefer simple and short code => adopt simplicity, don't overengineer and do not add unnecessary features/complications unless asked to do so.
