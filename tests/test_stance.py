@@ -92,6 +92,12 @@ def test_the_system_prompt_names_all_three_stances():
         assert word in SYSTEM_PROMPT
 
 
+def test_the_system_prompt_does_not_assume_a_next_day_expiry():
+    # On a Friday the expiry is Monday; "tomorrow" would contradict the date.
+    assert "tomorrow" not in SYSTEM_PROMPT
+    assert "1DTE" not in SYSTEM_PROMPT
+
+
 # anthropic_client
 
 def test_a_missing_api_key_fails_at_construction(monkeypatch):

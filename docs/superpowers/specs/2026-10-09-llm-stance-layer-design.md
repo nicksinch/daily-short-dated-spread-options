@@ -115,10 +115,10 @@ added on top.
 
 > You give a one-day directional view on SPY for a defined-risk options strategy. Your
 > stance decides the trade:
-> - bullish → sell a put credit spread (short put near 0.30 delta, 1DTE). It profits if
->   SPY stays above the short strike through tomorrow's close.
-> - bearish → sell a call credit spread (short call near 0.30 delta, 1DTE). It profits
->   if SPY stays below the short strike.
+> - bullish → sell a put credit spread (short put near 0.30 delta, next expiry). It
+>   profits if SPY stays above the short strike through the option expiry.
+> - bearish → sell a call credit spread (short call near 0.30 delta, next expiry). It
+>   profits if SPY stays below the short strike through the option expiry.
 > - neutral → no trade today.
 >
 > You are given only the features below; you have no news or other data. Choose neutral
