@@ -3,7 +3,7 @@ from datetime import timedelta
 
 import pytest
 
-from config import FeatureConfig, StrategyConfig, OrderConfig
+from config import FeatureConfig, StrategyConfig, OrderConfig, StanceConfig
 
 
 def test_defaults_match_the_design():
@@ -61,3 +61,17 @@ def test_order_config_is_frozen():
     cfg = OrderConfig()
     with pytest.raises(dataclasses.FrozenInstanceError):
         cfg.time_in_force = "gtc"
+
+
+def test_stance_defaults_match_the_design():
+    cfg = StanceConfig()
+    assert cfg.model == "claude-opus-5-5"
+    assert cfg.effort == "medium"
+    assert cfg.max_tokens == 8000
+    assert cfg.timeout_seconds == 60.0
+
+
+def test_stance_config_is_frozen():
+    cfg = StanceConfig()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        cfg.model = "claude-haiku-5-5"

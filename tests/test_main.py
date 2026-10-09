@@ -376,6 +376,13 @@ def test_standing_aside_prints_the_reason_in_place_of_legs():
     assert "SPY26" not in text
 
 
+def test_no_stance_prints_none_and_the_reason():
+    text = format_decision(Decision(None, None, "no stance: model call failed"))
+    assert "stance: none" in text
+    assert "stand aside" in text
+    assert "model call failed" in text
+
+
 def test_the_stance_flag_is_required(monkeypatch):
     monkeypatch.setattr(
         main_module.AlpacaClient, "from_env",

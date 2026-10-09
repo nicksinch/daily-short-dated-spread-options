@@ -53,7 +53,8 @@ def format_feature_set(fs: FeatureSet, symbol: str) -> str:
 
 def format_decision(decision: Decision) -> str:
     """The decision, and either its legs or the reason there are none."""
-    lines = [f"stance: {decision.stance.value}"]
+    stance = "none" if decision.stance is None else decision.stance.value
+    lines = [f"stance: {stance}"]
     if decision.proposal is None:
         lines.append(f"decision: stand aside — {decision.reason}")
         return "\n".join(lines)
