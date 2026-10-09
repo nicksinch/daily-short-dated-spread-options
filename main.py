@@ -1,9 +1,10 @@
 """Entrypoint for the daily SPY spread agent.
 
-Fetches market data, computes the features, decides, and either prints the
-order it would place (--dry-run) or places it (--submit). Exactly one of
-those flags is required: there is no default, and no bare invocation that
-trades.
+Fetches market data, computes the features, takes a stance (from --stance,
+or from the model in stance.py when it is omitted), decides, and either
+prints the order it would place (--dry-run) or places it (--submit).
+Exactly one of those flags is required: there is no default, and no bare
+invocation that trades.
 
 Only `broker.py` can reach an order endpoint, and the --dry-run path returns
 before a Broker is constructed.
@@ -16,11 +17,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from broker import Broker
-from config import FeatureConfig, OrderConfig, StrategyConfig
+from config import FeatureConfig, OrderConfig, StanceConfig, StrategyConfig
 from data import AlpacaClient
 from features import FeatureSet, build_feature_set, spot_feature
-from journal import DRY_RUN, MANUAL, SUBMIT, append, build_record
+from journal import DRY_RUN, MANUAL, MODEL, SUBMIT, append, build_record
 from orders import OrderState, build_order, existing_exposure
+from stance import anthropic_client, ask_stance
 from strategy import Decision, Stance, build_decision
 
 EASTERN = ZoneInfo("America/New_York")
@@ -108,17 +110,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--stance",
-        required=True,
         type=Stance,
         choices=list(Stance),
         metavar="{bullish,bearish,neutral}",  # choices renders the enum repr otherwise
-        help="directional view; supplied by hand until the LLM layer exists",
+        help="manual override; omit to ask the model",
     )
     args = parser.parse_args(argv)
 
     cfg = FeatureConfig()
     strategy_cfg = StrategyConfig()
     client = AlpacaClient.from_env(cfg)
+    stance_cfg = StanceConfig()
+    model = None if args.stance is not None else anthropic_client(stance_cfg)
 
     now = datetime.now(tz=EASTERN)
     today = now.date()
@@ -148,7 +151,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(format_feature_set(features, cfg.underlying))
     print()
-    decision = build_decision(features, chain, args.stance, account.equity, strategy_cfg)
+    if model is None:
+        stance, stance_source, stance_reason = args.stance, MANUAL, None
+    else:
+        call = ask_stance(features, stance_cfg, model)
+        stance, stance_source, stance_reason = call.stance, MODEL, call.reason
+        shown = "none" if stance is None else stance.value
+        print(f"model stance: {shown} — {stance_reason}")
+
+    if stance is None:
+        decision = Decision(None, None, f"no stance: {stance_reason}")
+    else:
+        decision = build_decision(features, chain, stance, account.equity, strategy_cfg)
     print(format_decision(decision))
 
     order_cfg = OrderConfig()
@@ -156,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     context = dict(
         now=now, mode=mode, underlying=cfg.underlying, expiry=expiry,
         features=features, decision=decision,
-        stance_source=MANUAL, stance_reason=None,
+        stance_source=stance_source, stance_reason=stance_reason,
     )
 
     if decision.proposal is None:
