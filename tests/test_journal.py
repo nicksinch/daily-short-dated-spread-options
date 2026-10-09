@@ -2,7 +2,7 @@ import json
 from datetime import date, datetime, timedelta, timezone
 
 from features import Feature, FeatureSet
-from journal import DRY_RUN, SUBMIT, append, build_record
+from journal import DRY_RUN, MANUAL, MODEL, SUBMIT, append, build_record
 from orders import OrderRecord, OrderState
 from strategy import Decision, SpreadLeg, SpreadProposal, Stance
 
@@ -44,10 +44,12 @@ def a_stand_aside():
     return Decision(Stance.NEUTRAL, None, "neutral stance: no directional edge")
 
 
-def make(decision, mode=SUBMIT, payload=None, record=None):
+def make(decision, mode=SUBMIT, payload=None, record=None,
+         stance_source=MANUAL, stance_reason=None):
     return build_record(
         now=NOW, mode=mode, underlying="SPY", expiry=EXPIRY,
         features=a_feature_set(), decision=decision,
+        stance_source=stance_source, stance_reason=stance_reason,
         payload=payload, record=record,
     )
 
@@ -147,3 +149,25 @@ def test_a_serialization_failure_warns_with_repr_and_writes_nothing(tmp_path, ca
     assert "WARNING" in err
     assert "object at" in err  # repr(object()) contains "object at 0x..."
     assert not (tmp_path / "decisions.jsonl").exists()
+
+
+def test_a_manual_stance_records_its_source_and_no_reason():
+    record = make(a_trade())
+    assert record["stance_source"] == "manual"
+    assert record["stance_reason"] is None
+
+
+def test_a_model_stance_records_the_model_and_its_reason():
+    record = make(a_trade(), stance_source=MODEL, stance_reason="spot above both averages")
+    assert record["stance"] == "bullish"
+    assert record["stance_source"] == "model"
+    assert record["stance_reason"] == "spot above both averages"
+
+
+def test_no_stance_records_null_and_round_trips():
+    decision = Decision(None, None, "no stance: model call failed: RateLimitError")
+    record = make(decision, stance_source=MODEL,
+                  stance_reason="model call failed: RateLimitError")
+    assert record["stance"] is None
+    assert record["decision"]["will_trade"] is False
+    assert json.loads(json.dumps(record)) == record

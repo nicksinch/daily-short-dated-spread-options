@@ -17,6 +17,8 @@ from strategy import FEATURE_NAMES, Decision
 
 DRY_RUN = "dry_run"
 SUBMIT = "submit"
+MANUAL = "manual"  # stance from --stance
+MODEL = "model"    # stance from stance.py
 
 
 def _feature(feature: Feature) -> dict:
@@ -80,6 +82,8 @@ def build_record(
     expiry: date,
     features: FeatureSet,
     decision: Decision,
+    stance_source: str,
+    stance_reason: str | None,
     payload: dict | None = None,
     record: OrderRecord | None = None,
 ) -> dict:
@@ -89,7 +93,9 @@ def build_record(
         "mode": mode,
         "underlying": underlying,
         "expiry": expiry.isoformat(),
-        "stance": decision.stance.value,
+        "stance": None if decision.stance is None else decision.stance.value,
+        "stance_source": stance_source,
+        "stance_reason": stance_reason,
         "features": {name: _feature(getattr(features, name)) for name in FEATURE_NAMES},
         "decision": _decision(decision),
         "order": _order(payload, record),

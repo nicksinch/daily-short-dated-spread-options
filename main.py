@@ -19,7 +19,7 @@ from broker import Broker
 from config import FeatureConfig, OrderConfig, StrategyConfig
 from data import AlpacaClient
 from features import FeatureSet, build_feature_set, spot_feature
-from journal import DRY_RUN, SUBMIT, append, build_record
+from journal import DRY_RUN, MANUAL, SUBMIT, append, build_record
 from orders import OrderState, build_order, existing_exposure
 from strategy import Decision, Stance, build_decision
 
@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
     context = dict(
         now=now, mode=mode, underlying=cfg.underlying, expiry=expiry,
         features=features, decision=decision,
+        stance_source=MANUAL, stance_reason=None,
     )
 
     if decision.proposal is None:
