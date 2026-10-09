@@ -57,8 +57,9 @@ requirements.txt  + anthropic, pinned                                 (changed)
 ```
 
 `stance.py` is the only module that imports `anthropic`, as `broker.py` is the only one
-that reaches an order endpoint. `main.py` constructs the client only when `--stance` is
-absent, so a manual run needs no Anthropic key.
+that reaches an order endpoint; a test asserts it. `main.py` builds the client through
+`stance.anthropic_client(cfg)`, and only when `--stance` is absent, so a manual run needs
+no Anthropic key.
 
 ## Configuration
 
@@ -87,6 +88,7 @@ class StanceReply(BaseModel):          # the structured-output schema
 
 SYSTEM_PROMPT: str                     # fixed text, below
 def build_prompt(features: FeatureSet) -> str: ...           # pure
+def anthropic_client(cfg: StanceConfig) -> anthropic.Anthropic: ...  # timeout from cfg
 def ask_stance(features, cfg: StanceConfig, client) -> StanceCall: ...
 ```
 
@@ -96,10 +98,12 @@ def ask_stance(features, cfg: StanceConfig, client) -> StanceCall: ...
    `StanceCall(None, "features unusable: …")` without calling the client.
 2. Call `client.messages.parse(model=…, max_tokens=…, output_config={"effort": …},
    system=SYSTEM_PROMPT, messages=[user: build_prompt(features)],
-   output_format=StanceReply)` with the configured timeout.
+   output_format=StanceReply)`. The timeout is set on the client.
 3. Map the result:
-   - `anthropic.APIError` (connection, timeout, rate limit, any status) →
-     `StanceCall(None, "model call failed: <ExceptionType>: <message>")`;
+   - `anthropic.APIError` (connection, timeout, rate limit, any status), or
+     `pydantic.ValidationError` (the SDK validates the reply text against the schema
+     and raises this when it is not valid JSON, e.g. cut off) →
+     `StanceCall(None, "model call failed: <ExceptionType>: <first line of message>")`;
    - `stop_reason` of `refusal` or `max_tokens`, or no `parsed_output` →
      `StanceCall(None, "no usable model reply: <stop_reason>")`;
    - otherwise `StanceCall(Stance(reply.stance), reply.reason)`.
@@ -130,7 +134,7 @@ changes daily is in the user message.
 
 ```
 SPY features as of 2026-10-09T10:15:00-04:00 (market open)
-Option expiry: 2026-10-10 (1DTE)
+Option expiry: 2026-10-10
 
 spot          671.42
 spot/sma20    1.0123   (spot is 1.23% above its 20-day average)
@@ -159,8 +163,8 @@ also in the journal, so any run's prompt can be rebuilt from its journal line.
 - If the stance is `None`: `decision = Decision(None, None, f"no stance: {call.reason}")`
   and the existing stand-aside path runs (journal, exit 0). Otherwise
   `build_decision(...)` as today.
-- `format_decision` prints `stance: none` for a `None` stance and, for a model stance,
-  the model's reason on the line after it.
+- With a model call, `main.py` prints `model stance: <stance or none> — <reason>` before
+  the decision. `format_decision` prints `stance: none` for a `None` stance.
 
 Because a `None` stance takes the stand-aside path, it returns before a `Broker` is
 constructed, as every stand-aside already does.
@@ -185,6 +189,7 @@ returns a canned object or raises.
 - an unusable feature → the client is never called, and the reason names the feature;
 - `APIConnectionError`, `RateLimitError`, `APIStatusError` → stance `None`, reason
   carries the exception type;
+- `pydantic.ValidationError` from the parse → stance `None`;
 - `stop_reason` `refusal`, `stop_reason` `max_tokens`, and a missing `parsed_output` →
   stance `None`.
 
