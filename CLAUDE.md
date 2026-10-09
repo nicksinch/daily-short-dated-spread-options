@@ -19,12 +19,17 @@ trading in Alpaca's paper environment.
 - `broker.py` — the only module that can place an order. Everything reaching
   an order endpoint lives here; `data.py` stays read-only.
 - `journal.py` — one JSON line per run, appended, stand-asides included.
-- `main.py --dry-run|--submit --stance <bullish|bearish|neutral>` — fetches,
-  computes, decides, and either prints the order it would place or places it.
+- `stance.py` — the only module that imports `anthropic`. Builds the prompt
+  from the five features, makes one structured call to Claude, and returns
+  `StanceCall(None, reason)` on any failure so the run stands aside.
+- `main.py --dry-run|--submit [--stance <bullish|bearish|neutral>]` — fetches,
+  computes, takes a stance (from the model when `--stance` is omitted),
+  decides, and either prints the order it would place or places it.
   Exactly one mode flag is required.
 - `tests/` — pytest. Run with `.venv/bin/pytest`.
 
-Credentials come from `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`.
+Credentials come from `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY` and, when
+`--stance` is omitted, `ANTHROPIC_API_KEY`.
 
 ## Environment
 
@@ -53,9 +58,9 @@ construction and submission are implemented and documented in
 positions only: nothing closes a spread, so a position is left to expire or
 be closed by hand.
 
-Two invariants are asserted by `tests/test_main.py` rather than merely
+Three invariants are asserted by `tests/test_main.py` rather than merely
 intended: `/v2/orders` appears only in `broker.py`, and the `mleg`
-vocabulary only in `orders.py`. A credit spread is priced with a **negative**
+vocabulary only in `orders.py`. `anthropic` is imported only in `stance.py`. A credit spread is priced with a **negative**
 `limit_price` — Alpaca reads a positive multi-leg limit as a debit, and a
 positive price on a credit spread fills rather than being rejected.
 

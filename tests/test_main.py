@@ -2,7 +2,10 @@ import dataclasses
 import json
 import pathlib
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
+import anthropic
+import httpx2
 import pytest
 
 import config as config_module
@@ -11,6 +14,7 @@ from config import FeatureConfig
 from data import Account, DailyBar, MarketClock, OptionQuote, StockQuote, StockTrade
 from features import Feature, FeatureSet
 from main import format_decision, format_feature_set
+from stance import StanceReply
 from strategy import Decision, SpreadLeg, SpreadProposal, Stance
 
 NOW = datetime(2026, 9, 3, 15, 36, tzinfo=timezone.utc)
@@ -69,7 +73,7 @@ def test_only_broker_reaches_an_order_endpoint():
     root = pathlib.Path(__file__).parent.parent
     modules = (
         "config.py", "data.py", "features.py", "strategy.py",
-        "orders.py", "broker.py", "journal.py", "main.py",
+        "orders.py", "broker.py", "journal.py", "main.py", "stance.py",
     )
     sources = {name: (root / name).read_text() for name in modules}
 
@@ -80,6 +84,13 @@ def test_only_broker_reaches_an_order_endpoint():
         if name != "orders.py":
             for forbidden in ("order_class", "mleg", "position_intent"):
                 assert forbidden not in source, f"{name} mentions {forbidden}"
+
+    import re
+    imports_anthropic = re.compile(r"^\s*(import|from)\s+anthropic\b", re.MULTILINE)
+    for name, source in sources.items():
+        if name != "stance.py":
+            assert not imports_anthropic.search(source), f"{name} imports anthropic"
+    assert imports_anthropic.search(sources["stance.py"])
 
 
 def test_exactly_one_mode_flag_is_required():
@@ -144,6 +155,31 @@ class StubClient:
         return Account(equity=100_000.0)
 
 
+class FakeModel:
+    """Stands in for anthropic.Anthropic. Records calls, performs no I/O."""
+
+    def __init__(self, stance="bullish", reason="spot above both averages", error=None):
+        self.stance = stance
+        self.reason = reason
+        self.error = error
+        self.calls = []
+        self.messages = self
+
+    def parse(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(
+            stop_reason="end_turn",
+            parsed_output=StanceReply(stance=self.stance, reason=self.reason),
+        )
+
+
+def use_model(monkeypatch, model):
+    monkeypatch.setattr(main_module, "anthropic_client", lambda cfg: model)
+    return model
+
+
 def run_main_with(
     monkeypatch, quote, trade, stance="neutral", bars=None, chain=None,
     mode="--dry-run", expected=0, journal_path=None,
@@ -163,7 +199,8 @@ def run_main_with(
                 fill_poll_seconds=0.0, fill_timeout_seconds=0.0,
             ),
         )
-    assert main_module.main([mode, "--stance", stance]) == expected
+    argv = [mode] if stance is None else [mode, "--stance", stance]
+    assert main_module.main(argv) == expected
     return client
 
 
@@ -212,10 +249,11 @@ def an_outcome(status="filled", state=None):
 
 
 def a_bullish_run(monkeypatch, **kwargs):
+    kwargs.setdefault("stance", "bullish")
     return run_main_with(
         monkeypatch,
         quote=StockQuote(bid=765.0, ask=765.5, bid_size=1, ask_size=1, timestamp=NOW),
-        trade=None, stance="bullish", bars=daily_bars(60, date(2026, 9, 3)),
+        trade=None, bars=daily_bars(60, date(2026, 9, 3)),
         chain=a_full_chain(), **kwargs,
     )
 
@@ -376,13 +414,23 @@ def test_standing_aside_prints_the_reason_in_place_of_legs():
     assert "SPY26" not in text
 
 
-def test_the_stance_flag_is_required(monkeypatch):
-    monkeypatch.setattr(
-        main_module.AlpacaClient, "from_env",
-        classmethod(lambda cls, cfg: StubClient(None, None)),
-    )
-    with pytest.raises(SystemExit):
-        main_module.main(["--dry-run"])
+def test_no_stance_prints_none_and_the_reason():
+    text = format_decision(Decision(None, None, "no stance: model call failed"))
+    assert "stance: none" in text
+    assert "stand aside" in text
+    assert "model call failed" in text
+
+
+def test_omitting_the_stance_asks_the_model(monkeypatch, tmp_path):
+    model = use_model(monkeypatch, FakeModel(stance="bullish"))
+    path = tmp_path / "d.jsonl"
+    a_bullish_run(monkeypatch, stance=None, journal_path=str(path))
+    assert len(model.calls) == 1
+    record = json.loads(path.read_text())
+    assert record["stance"] == "bullish"
+    assert record["stance_source"] == "model"
+    assert record["stance_reason"] == "spot above both averages"
+    assert record["decision"]["will_trade"] is True
 
 
 def test_an_unknown_stance_is_rejected(monkeypatch):
@@ -506,3 +554,70 @@ def test_a_one_sided_wing_still_prints_a_decision(monkeypatch, capsys):
     long_line = next(l for l in text.splitlines() if "SPY260905P00756000" in l)
     assert "ask -" in short_line and "bid 1.60" in short_line
     assert "delta -" in long_line and "bid -" in long_line and "ask 0.95" in long_line
+
+
+def test_a_manual_stance_never_asks_the_model(monkeypatch, tmp_path):
+    def explode(cfg):
+        raise AssertionError("--stance must not construct an Anthropic client")
+
+    monkeypatch.setattr(main_module, "anthropic_client", explode)
+    path = tmp_path / "d.jsonl"
+    a_bullish_run(monkeypatch, journal_path=str(path))
+    record = json.loads(path.read_text())
+    assert record["stance_source"] == "manual"
+    assert record["stance_reason"] is None
+
+
+def test_a_neutral_model_stance_stands_aside(monkeypatch, tmp_path):
+    use_model(monkeypatch, FakeModel(stance="neutral", reason="signals are mixed"))
+    path = tmp_path / "d.jsonl"
+    a_bullish_run(monkeypatch, stance=None, journal_path=str(path))
+    record = json.loads(path.read_text())
+    assert record["stance"] == "neutral"
+    assert record["stance_source"] == "model"
+    assert record["stance_reason"] == "signals are mixed"
+    assert record["decision"]["will_trade"] is False
+
+
+def test_a_failed_model_call_stands_aside_and_never_reaches_the_broker(
+    monkeypatch, tmp_path, capsys
+):
+    def explode(cls, cfg):
+        raise AssertionError("no stance must not construct a Broker")
+
+    monkeypatch.setattr(main_module.Broker, "from_env", classmethod(explode))
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    use_model(monkeypatch, FakeModel(error=anthropic.APIConnectionError(request=request)))
+    path = tmp_path / "d.jsonl"
+    a_bullish_run(monkeypatch, stance=None, mode="--submit", expected=0,
+                  journal_path=str(path))
+    record = json.loads(path.read_text())
+    assert record["stance"] is None
+    assert record["stance_source"] == "model"
+    assert "APIConnectionError" in record["stance_reason"]
+    assert record["decision"]["will_trade"] is False
+    assert "stance: none" in capsys.readouterr().out
+
+
+def test_unusable_features_never_reach_the_model(monkeypatch, tmp_path):
+    model = use_model(monkeypatch, FakeModel())
+    path = tmp_path / "d.jsonl"
+    run_main_with(monkeypatch, quote=None, trade=None, stance=None,
+                  journal_path=str(path))
+    assert model.calls == []
+    record = json.loads(path.read_text())
+    assert record["stance"] is None
+    assert "features unusable" in record["stance_reason"]
+
+
+def test_a_missing_api_key_fails_before_any_market_data(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    client = StubClient(None, None)
+    fetched = []
+    client.get_clock = lambda: fetched.append("clock")
+    monkeypatch.setattr(
+        main_module.AlpacaClient, "from_env", classmethod(lambda cls, cfg: client)
+    )
+    with pytest.raises(KeyError, match="ANTHROPIC_API_KEY"):
+        main_module.main(["--dry-run"])
+    assert fetched == []

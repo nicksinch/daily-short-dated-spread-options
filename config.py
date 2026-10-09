@@ -68,3 +68,17 @@ class OrderConfig:
     fill_poll_seconds: float = 1.0      # between order status re-fetches
     fill_timeout_seconds: float = 15.0  # then stop polling and record what was seen
     journal_path: str = "decisions.jsonl"  # relative to the process's working directory
+
+
+@dataclass(frozen=True)
+class StanceConfig:
+    """Tunables for asking the model for a stance.
+
+    Separate from the others because this is about one model call, not
+    about features, strikes or orders.
+    """
+
+    model: str = "claude-opus-5-5"
+    effort: str = "medium"         # the model's default; set so it is visible
+    max_tokens: int = 8000         # thinking counts against this, so not a one-word budget
+    timeout_seconds: float = 60.0

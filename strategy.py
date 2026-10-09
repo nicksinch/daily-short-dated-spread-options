@@ -2,9 +2,8 @@
 
 Everything consequential about a trade is decided here: which structure a
 stance implies, which strikes it lands on, what it can lose and how many
-contracts fit the risk budget. The stance itself is an argument -- the layer
-that produces it does not exist yet, and this module does not care how it is
-produced.
+contracts fit the risk budget. The stance itself is an argument, chosen by
+hand or by `stance.py`; this module does not care how it is produced.
 
 Standing aside is a value, not an exception: `Decision` carries a reason in
 both directions so a quiet day is as explainable as a busy one.
@@ -21,7 +20,7 @@ from features import FeatureSet
 
 
 class Stance(str, Enum):
-    """A directional view. The only thing a later LLM layer will choose."""
+    """A directional view. The only thing the model in stance.py chooses."""
 
     BULLISH = "bullish"
     BEARISH = "bearish"
@@ -64,7 +63,7 @@ class SpreadProposal:
 
 @dataclass(frozen=True)
 class Decision:
-    stance: Stance
+    stance: Stance | None  # None: no stance was available, so nothing was decided
     proposal: SpreadProposal | None
     reason: str
 
@@ -157,7 +156,7 @@ def position_size(equity: float, risk_fraction: float, max_loss: float) -> int:
 FEATURE_NAMES = ("spot", "rv20", "spot_over_sma20", "spot_over_sma50", "atm_iv")
 
 
-def _unusable_features(features: FeatureSet) -> list[str]:
+def unusable_features(features: FeatureSet) -> list[str]:
     """Names and reasons for every feature that is not ok."""
     faults = []
     for name in FEATURE_NAMES:
@@ -197,7 +196,7 @@ def build_decision(
     if structure is None:
         return Decision(stance, None, "neutral stance: no directional edge")
 
-    faults = _unusable_features(features)
+    faults = unusable_features(features)
     if faults:
         return Decision(stance, None, f"features not ok: {', '.join(faults)}")
 
